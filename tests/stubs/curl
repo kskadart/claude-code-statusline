@@ -1,0 +1,22 @@
+#!/bin/bash
+# Test stub for `curl`. NEVER makes a real network request.
+#
+# Controlled by env vars:
+#   STUB_CURL_CALLED_MARKER  - if set, this file is touched every time the
+#                              stub runs, so tests can assert curl was (or
+#                              was not) invoked.
+#   STUB_CURL_RESPONSE_FILE  - if set, its contents are printed to stdout
+#                              (the real statusline.sh redirects curl's
+#                              stdout into its own cache tmp file, so this
+#                              stub does not need to look at its arguments).
+#   (STUB_CURL_RESPONSE_FILE unset) - print nothing, exit 0 (empty response).
+
+if [ -n "${STUB_CURL_CALLED_MARKER:-}" ]; then
+    : > "$STUB_CURL_CALLED_MARKER"
+fi
+
+if [ -n "${STUB_CURL_RESPONSE_FILE:-}" ]; then
+    cat "$STUB_CURL_RESPONSE_FILE"
+fi
+
+exit 0

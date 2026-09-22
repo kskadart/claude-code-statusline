@@ -1,0 +1,310 @@
+#!/usr/bin/env bats
+# Tests for statusline.sh.
+#
+# Safety: every test prepends tests/stubs (fake `security` and `curl`) to
+# PATH, so the script can never read the real macOS Keychain or make a real
+# network request, even when this suite is run on a machine that has a real
+# Claude Code Keychain entry. HOME and CLAUDE_STATUSLINE_CACHE_DIR are also
+# redirected to per-test temp directories, so the real ~/.claude/cache is
+# never touched.
+
+bats_require_minimum_version 1.5.0
+
+SCRIPT="$BATS_TEST_DIRNAME/../statusline.sh"
+STUBS_DIR="$BATS_TEST_DIRNAME/stubs"
+FIXTURES_DIR="$BATS_TEST_DIRNAME/fixtures"
+
+setup() {
+    TEST_HOME="$BATS_TEST_TMPDIR/home"
+    TEST_CACHE_DIR="$BATS_TEST_TMPDIR/cache"
+    mkdir -p "$TEST_HOME"
+    # Intentionally do NOT pre-create TEST_CACHE_DIR: the script must
+    # mkdir -p it itself, and several tests assert it stays absent.
+
+    export HOME="$TEST_HOME"
+    export CLAUDE_STATUSLINE_CACHE_DIR="$TEST_CACHE_DIR"
+    export PATH="$STUBS_DIR:$PATH"
+
+    unset STUB_SECURITY_TOKEN
+    unset STUB_CURL_RESPONSE_FILE
+    export STUB_CURL_CALLED_MARKER="$BATS_TEST_TMPDIR/curl-called"
+    rm -f "$STUB_CURL_CALLED_MARKER"
+
+    CACHE_FILE="$TEST_CACHE_DIR/statusline-ratelimit.json"
+}
+
+# Strip ANSI SGR color codes from a string. Works with the perl available on
+# both macOS and Linux GitHub Actions runners (avoids GNU-vs-BSD `sed -e`
+# escape differences for \x1b).
+strip_ansi() {
+    printf '%s' "$1" | perl -pe 's/\e\[[0-9;]*m//g'
+}
+
+# Run statusline.sh with the given fixture file on stdin, in an explicit,
+# minimal environment (PATH/HOME/CLAUDE_STATUSLINE_CACHE_DIR threaded through
+# as positional args, not string-interpolated, to avoid quoting issues).
+run_statusline() {
+    local fixture="$1"
+    run bash -c 'PATH="$1" HOME="$2" CLAUDE_STATUSLINE_CACHE_DIR="$3" "$4" < "$5"' _ \
+        "$PATH" "$HOME" "$CLAUDE_STATUSLINE_CACHE_DIR" "$SCRIPT" "$fixture"
+}
+
+# Build a fixture with rate_limits.*.resets_at set to now+offset seconds,
+# written into a fresh file under BATS_TEST_TMPDIR. Only patches the keys
+# that are present in the source fixture.
+with_resets_at() {
+    local src="$1" out="$2" five_offset="$3" week_offset="${4:-}"
+    local now five_at week_at
+    now=$(date +%s)
+    five_at=$((now + five_offset))
+    if [ -n "$week_offset" ]; then
+        week_at=$((now + week_offset))
+        jq --argjson five "$five_at" --argjson week "$week_at" \
+            '.rate_limits.five_hour.resets_at = $five | .rate_limits.seven_day.resets_at = $week' \
+            "$src" > "$out"
+    else
+        jq --argjson five "$five_at" \
+            '.rate_limits.five_hour.resets_at = $five' \
+            "$src" > "$out"
+    fi
+}
+
+# Cross-platform "set this file's mtime to N seconds ago" (BSD `date -v` on
+# macOS, GNU `date -d` on Linux both accept the same `touch -t` timestamp
+# format: [[CC]YY]MMDDhhmm.ss).
+age_file() {
+    local file="$1" seconds_ago="$2" ts
+    ts=$(date -v-"${seconds_ago}"S +%Y%m%d%H%M.%S 2>/dev/null || date -d "-${seconds_ago} seconds" +%Y%m%d%H%M.%S)
+    touch -t "$ts" "$file"
+}
+
+file_mode() {
+    stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
+}
+
+@test "full render with rate_limits: all segments present, correct order, no +0/-0" {
+    local fixture="$BATS_TEST_TMPDIR/full.json"
+    with_resets_at "$FIXTURES_DIR/full.json" "$fixture" 7200 100000
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+
+    clean=$(strip_ansi "$output")
+    echo "clean: $clean" >&3
+
+    [[ "$clean" == *"myproj"* ]]
+    [[ "$clean" == *'$1.23'* ]]
+    [[ "$clean" == *"ctx:42%"* ]]
+    [[ "$clean" == *"5h:23%"* ]]
+    [[ "$clean" == *"7d:37%"* ]]
+    [[ "$clean" == *"1h1m"* ]]
+    [[ "$clean" =~ [0-9]{2}:[0-9]{2}:[0-9]{2} ]]
+    [[ "$clean" != *"+0/-0"* ]]
+
+    # Segment order via a single regex over the whole line.
+    [[ "$clean" =~ myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%.*\ \|\ 7d:37%.*\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2} ]]
+
+    # No fallback path should have been taken: rate_limits came from stdin.
+    [ ! -f "$STUB_CURL_CALLED_MARKER" ]
+    [ ! -d "$TEST_CACHE_DIR" ]
+}
+
+@test "lines segment shown as +12/-3 when lines were added and removed" {
+    run_statusline "$FIXTURES_DIR/lines.json"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"+12"* ]]
+    [[ "$clean" == *"-3"* ]]
+    [[ "$clean" =~ \+12/-3 ]] || [[ "$clean" == *"+12"*"/"*"-3"* ]]
+}
+
+@test "current_dir == HOME renders as ~" {
+    local fixture="$BATS_TEST_TMPDIR/home-dir.json"
+    jq --arg home "$HOME" '.workspace.current_dir = $home' "$FIXTURES_DIR/home-dir.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == "~ |"* ]]
+}
+
+@test "resets_at in the future (+3750s) formats as (1h2m)" {
+    local fixture="$BATS_TEST_TMPDIR/resets-future.json"
+    with_resets_at "$FIXTURES_DIR/resets-template.json" "$fixture" 3750
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"(1h2m)"* ]]
+}
+
+@test "resets_at in the past formats as (now)" {
+    local fixture="$BATS_TEST_TMPDIR/resets-past.json"
+    with_resets_at "$FIXTURES_DIR/resets-template.json" "$fixture" -120
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"(now)"* ]]
+}
+
+@test "resets_at far in the future (+91800s) formats as (1d1h)" {
+    local fixture="$BATS_TEST_TMPDIR/resets-far.json"
+    # 91800s = 1d1h30m, a 30-minute margin so a second's jitter between
+    # computing the offset here and NOW inside statusline.sh never flips
+    # the hour bucket (91800 was 90000 = exactly 1d1h, which flapped to
+    # 1d0h roughly 1 run in 10 under a slow test host).
+    with_resets_at "$FIXTURES_DIR/resets-template.json" "$fixture" 91800
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"(1d1h)"* ]]
+}
+
+@test "no rate_limits, no cache, security returns nothing: 5h/7d absent, no curl, no cache" {
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" != *"5h:"* ]]
+    [[ "$clean" != *"7d:"* ]]
+    [ ! -f "$STUB_CURL_CALLED_MARKER" ]
+    [ ! -f "$CACHE_FILE" ]
+}
+
+@test "fallback via curl: renders 5h:56% and 7d:12%, cache created with mode 600" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/fallback-usage.json"
+
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"5h:56%"* ]]
+    [[ "$clean" == *"7d:12%"* ]]
+    # resets_at is 2099-01-01, far enough out to always render as "XdYh".
+    [[ "$clean" =~ \([0-9]+d[0-9]+h\) ]]
+
+    [ -f "$STUB_CURL_CALLED_MARKER" ]
+    [ -f "$CACHE_FILE" ]
+    [ "$(file_mode "$CACHE_FILE")" = "600" ]
+}
+
+@test "fresh cache (<60s old): curl is not called, values come from cache" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/fallback-usage.json"
+
+    mkdir -p "$TEST_CACHE_DIR"
+    cp "$FIXTURES_DIR/fallback-usage.json" "$CACHE_FILE"
+    chmod 600 "$CACHE_FILE"
+    # mtime defaults to "now", well within the 60s freshness window.
+
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"5h:56%"* ]]
+    [[ "$clean" == *"7d:12%"* ]]
+    [ ! -f "$STUB_CURL_CALLED_MARKER" ]
+}
+
+@test "stale cache (>60s old): curl is called and cache is refreshed" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/fallback-usage.json"
+
+    mkdir -p "$TEST_CACHE_DIR"
+    printf '{"five_hour":{"utilization":1,"resets_at":"2099-01-01T00:00:00.000000+00:00"},"seven_day":{"utilization":2,"resets_at":"2099-01-01T00:00:00.000000+00:00"}}' > "$CACHE_FILE"
+    chmod 600 "$CACHE_FILE"
+    age_file "$CACHE_FILE" 120
+
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [ -f "$STUB_CURL_CALLED_MARKER" ]
+    [[ "$clean" == *"5h:56%"* ]]
+    [[ "$clean" == *"7d:12%"* ]]
+}
+
+@test "CLAUDE_STATUSLINE_CACHE_DIR is honored: cache appears exactly there" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/fallback-usage.json"
+
+    local alt_dir="$BATS_TEST_TMPDIR/alt-cache"
+    export CLAUDE_STATUSLINE_CACHE_DIR="$alt_dir"
+
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+    [ -f "$alt_dir/statusline-ratelimit.json" ]
+    [ ! -f "$CACHE_FILE" ]
+}
+
+@test "invalid curl response: no cache written, .tmp cleaned up, script still exits 0" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/fallback-invalid.json"
+
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" != *"5h:"* ]]
+    [[ "$clean" != *"7d:"* ]]
+    [ -f "$STUB_CURL_CALLED_MARKER" ]
+    [ ! -f "$CACHE_FILE" ]
+    [ ! -f "$CACHE_FILE.tmp" ]
+    [ -n "$clean" ]
+}
+
+@test "high ctx (95%) is colored red before rendering" {
+    run_statusline "$FIXTURES_DIR/high-ctx.json"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\033[31mctx:95%'* ]]
+}
+
+@test "default cache dir (no CLAUDE_STATUSLINE_CACHE_DIR): writes under \$HOME/.claude/cache, mode 600" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/fallback-usage.json"
+    unset CLAUDE_STATUSLINE_CACHE_DIR
+    # HOME is still the per-test temp dir from setup(), so this never
+    # touches the real ~/.claude/cache.
+
+    run_statusline "$FIXTURES_DIR/minimal.json"
+    [ "$status" -eq 0 ]
+
+    local default_cache="$HOME/.claude/cache/statusline-ratelimit.json"
+    [ -f "$default_cache" ]
+    [ "$(file_mode "$default_cache")" = "600" ]
+}
+
+@test "ctx color thresholds: <70 green, 70-89 yellow, >=90 red" {
+    local base="$FIXTURES_DIR/minimal.json"
+    for pair in "69:32" "70:33" "89:33" "90:31"; do
+        local pct="${pair%%:*}"
+        local color="${pair##*:}"
+        local fixture="$BATS_TEST_TMPDIR/ctx-$pct.json"
+        jq --argjson pct "$pct" '.context_window.used_percentage = $pct' "$base" > "$fixture"
+
+        run_statusline "$fixture"
+        [ "$status" -eq 0 ]
+        local expected
+        expected=$'\033['"$color"'mctx:'"$pct"'%'
+        [[ "$output" == *"$expected"* ]]
+    done
+}
+
+@test "locale independence: a comma-decimal locale still renders dot-decimal numbers" {
+    local loc
+    loc=$(locale -a 2>/dev/null | grep -im1 -E 'de_DE\.utf-?8|ru_RU\.utf-?8') || true
+    if [ -z "$loc" ]; then
+        skip "no comma-decimal locale on this machine"
+    fi
+
+    local fixture="$BATS_TEST_TMPDIR/locale-full.json"
+    with_resets_at "$FIXTURES_DIR/full.json" "$fixture" 7200 100000
+
+    run --separate-stderr bash -c \
+        'LC_ALL="$1" PATH="$2" HOME="$3" CLAUDE_STATUSLINE_CACHE_DIR="$4" "$5" < "$6"' _ \
+        "$loc" "$PATH" "$HOME" "$CLAUDE_STATUSLINE_CACHE_DIR" "$SCRIPT" "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *'$1.23'* ]]
+    [[ "$clean" == *"5h:23%"* ]]
+    [[ "$clean" == *"7d:37%"* ]]
+    [ -z "$stderr" ]
+}

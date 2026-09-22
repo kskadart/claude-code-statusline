@@ -1,0 +1,15 @@
+#!/bin/bash
+# Test stub for macOS `security`. NEVER touches the real Keychain.
+#
+# Controlled by env vars:
+#   STUB_SECURITY_TOKEN   - if set, emit a Keychain-style JSON blob with this
+#                            access token on stdout (mimics `security ...  -w`
+#                            output for a generic password item storing JSON).
+#   (unset)                - emit nothing and exit 1, mimicking "item not found".
+
+if [ -n "${STUB_SECURITY_TOKEN:-}" ]; then
+    printf '{"claudeAiOauth":{"accessToken":"%s"}}\n' "$STUB_SECURITY_TOKEN"
+    exit 0
+fi
+
+exit 1

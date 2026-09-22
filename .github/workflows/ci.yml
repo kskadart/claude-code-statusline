@@ -1,0 +1,33 @@
+name: CI
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck and bats (ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bats jq perl
+
+      - name: Install shellcheck and bats (macos)
+        if: matrix.os == 'macos-latest'
+        run: brew install shellcheck bats-core jq
+
+      - name: shellcheck
+        run: shellcheck statusline.sh docs/render-screenshot.sh tests/stubs/*
+
+      - name: bats
+        run: bats tests/
