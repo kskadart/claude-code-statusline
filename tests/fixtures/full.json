@@ -1,5 +1,6 @@
 {
   "workspace": { "current_dir": "/home/user/projects/myproj" },
+  "model": { "id": "claude-fable-5-1", "display_name": "Fable 5.1" },
   "cost": {
     "total_cost_usd": 1.234,
     "total_duration_ms": 3661000,

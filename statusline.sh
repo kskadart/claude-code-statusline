@@ -2,14 +2,18 @@
 # Claude Code statusline with real-time Max/Pro rate-limit data.
 #
 # Layout:
-#   dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | 7d:N% (reset) | session_duration | time
+#   dir | model [N% (reset)] | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:N% (reset) | session_duration | time
 #
 # Rate-limit strategy:
 #   1. Prefer Claude Code's built-in rate_limits field (future-proof if the bug is fixed)
+#      for the 5h/w segments.
 #   2. Fall back to direct query of https://api.anthropic.com/api/oauth/usage using the
 #      OAuth token from macOS Keychain (Claude Code-credentials), cached to
 #      $HOME/.claude/cache/statusline-ratelimit.json for 60s to avoid spamming the endpoint.
 #      Override the cache directory with CLAUDE_STATUSLINE_CACHE_DIR.
+#   3. The model segment's own weekly usage (shown right after the model name) is not in
+#      stdin; it is read from the same usage endpoint/cache, fetched at most once per
+#      render whenever a model name is known. Disable with CLAUDE_STATUSLINE_MODEL_LIMIT=0.
 
 # Number parsing/formatting must not depend on the user's locale (printf %.2f with de_DE/ru_RU breaks)
 export LC_ALL=C
@@ -25,6 +29,30 @@ else
     DIR_DISPLAY="${DIR##*/}"
 fi
 
+# Model name/id: one jq call extracts both raw fields (empty string when
+# absent/null/not-a-string), silently on malformed input. Display name wins,
+# falling back to id; MODEL_NAME is empty (segment hidden) when neither is a
+# non-empty string. MODEL_DISPLAY/MODEL_ID (raw) are also used later to match
+# the model's own weekly-limit row from the usage endpoint.
+MODEL_TSV=$(printf '%s' "$input" | jq -r '
+    def pick(f): ([f] | map(select(type == "string" and . != ""))) as $vals
+        | if ($vals | length) > 0 then $vals[0] else "" end;
+    [pick(.model.display_name?), pick(.model.id?)] | @tsv
+' 2>/dev/null)
+MODEL_DISPLAY=${MODEL_TSV%%$'\t'*}
+MODEL_ID=${MODEL_TSV#*$'\t'}
+# No tab at all in MODEL_TSV (e.g. jq itself failed): the # expansion above
+# returns the whole string unchanged, so reset MODEL_ID to empty.
+if [ "$MODEL_ID" = "$MODEL_TSV" ]; then
+    MODEL_ID=""
+fi
+
+if [ -n "$MODEL_DISPLAY" ]; then
+    MODEL_NAME="$MODEL_DISPLAY"
+else
+    MODEL_NAME="$MODEL_ID"
+fi
+
 COST=$(printf '%s' "$input" | jq -r '.cost.total_cost_usd // 0')
 DUR_MS=$(printf '%s' "$input" | jq -r '.cost.total_duration_ms // 0')
 LINES_ADD=$(printf '%s' "$input" | jq -r '.cost.total_lines_added // 0')
@@ -37,15 +65,41 @@ FIVE_H_RESET=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.resets_at //
 WEEK=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 WEEK_RESET=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 
-# Fallback: query Anthropic OAuth usage endpoint directly when Claude Code doesn't surface it
-if [ -z "$FIVE_H" ] && [ -z "$WEEK" ]; then
-    CACHE_DIR="${CLAUDE_STATUSLINE_CACHE_DIR:-$HOME/.claude/cache}"
-    CACHE="$CACHE_DIR/statusline-ratelimit.json"
-    mkdir -p "$CACHE_DIR"
-    CACHE_MAX_AGE=60
+CACHE_DIR="${CLAUDE_STATUSLINE_CACHE_DIR:-$HOME/.claude/cache}"
+CACHE="$CACHE_DIR/statusline-ratelimit.json"
+CACHE_MAX_AGE=60
 
-    cache_stale=true
+# Fallback needed when Claude Code doesn't surface rate_limits on stdin.
+NEED_FALLBACK=false
+if [ -z "$FIVE_H" ] && [ -z "$WEEK" ]; then
+    NEED_FALLBACK=true
+fi
+
+# Per-model weekly usage: opt-out via CLAUDE_STATUSLINE_MODEL_LIMIT=0, and
+# only worth fetching when a model name is actually known.
+MODEL_LIMIT_ENABLED=true
+if [ "${CLAUDE_STATUSLINE_MODEL_LIMIT:-}" = "0" ]; then
+    MODEL_LIMIT_ENABLED=false
+fi
+
+NEED_MODEL_LIMIT=false
+if [ "$MODEL_LIMIT_ENABLED" = true ] && [ -n "$MODEL_NAME" ] && command -v security >/dev/null 2>&1; then
+    NEED_MODEL_LIMIT=true
+fi
+
+# ISO8601 UTC "YYYY-MM-DDTHH:MM:SS..." -> Unix epoch (macOS date uses -j -f)
+iso_to_epoch() {
+    local iso="$1"
+    TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${iso:0:19}" +%s 2>/dev/null || \
+        date -d "${iso}" +%s 2>/dev/null
+}
+
+# Refresh $CACHE from the Anthropic OAuth usage endpoint if it's missing or
+# older than CACHE_MAX_AGE. Called at most once per render.
+refresh_usage_cache() {
+    local cache_stale=true
     if [ -f "$CACHE" ]; then
+        local cache_mtime now_epoch
         cache_mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
         now_epoch=$(date +%s)
         if [ $((now_epoch - cache_mtime)) -le $CACHE_MAX_AGE ]; then
@@ -54,12 +108,14 @@ if [ -z "$FIVE_H" ] && [ -z "$WEEK" ]; then
     fi
 
     if [ "$cache_stale" = true ]; then
-        TOKEN=$(security find-generic-password -a "$USER" -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-        if [ -n "$TOKEN" ]; then
-            curl -s --max-time 2 \
-                -H "Authorization: Bearer $TOKEN" \
+        mkdir -p "$CACHE_DIR"
+        local token
+        token=$(security find-generic-password -a "$USER" -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+        if [ -n "$token" ]; then
+            ( umask 077; curl -s --max-time 2 \
+                -H "Authorization: Bearer $token" \
                 -H "anthropic-beta: oauth-2025-04-20" \
-                https://api.anthropic.com/api/oauth/usage > "$CACHE.tmp" 2>/dev/null
+                https://api.anthropic.com/api/oauth/usage > "$CACHE.tmp" 2>/dev/null )
             if [ -s "$CACHE.tmp" ] && jq -e '.five_hour.utilization' "$CACHE.tmp" >/dev/null 2>&1; then
                 chmod 600 "$CACHE.tmp"
                 mv "$CACHE.tmp" "$CACHE"
@@ -68,21 +124,50 @@ if [ -z "$FIVE_H" ] && [ -z "$WEEK" ]; then
             fi
         fi
     fi
+}
 
-    if [ -f "$CACHE" ]; then
-        FIVE_H=$(jq -r '.five_hour.utilization // empty' "$CACHE" 2>/dev/null)
-        FIVE_H_ISO=$(jq -r '.five_hour.resets_at // empty' "$CACHE" 2>/dev/null)
-        WEEK=$(jq -r '.seven_day.utilization // empty' "$CACHE" 2>/dev/null)
-        WEEK_ISO=$(jq -r '.seven_day.resets_at // empty' "$CACHE" 2>/dev/null)
+if [ "$NEED_FALLBACK" = true ] || [ "$NEED_MODEL_LIMIT" = true ]; then
+    refresh_usage_cache
+fi
 
-        # ISO8601 UTC "YYYY-MM-DDTHH:MM:SS..." → Unix epoch (macOS date uses -j -f)
-        if [ -n "$FIVE_H_ISO" ]; then
-            FIVE_H_RESET=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${FIVE_H_ISO:0:19}" +%s 2>/dev/null || \
-                           date -d "${FIVE_H_ISO}" +%s 2>/dev/null)
-        fi
-        if [ -n "$WEEK_ISO" ]; then
-            WEEK_RESET=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${WEEK_ISO:0:19}" +%s 2>/dev/null || \
-                         date -d "${WEEK_ISO}" +%s 2>/dev/null)
+if [ "$NEED_FALLBACK" = true ] && [ -f "$CACHE" ]; then
+    FIVE_H=$(jq -r '.five_hour.utilization // empty' "$CACHE" 2>/dev/null)
+    FIVE_H_ISO=$(jq -r '.five_hour.resets_at // empty' "$CACHE" 2>/dev/null)
+    WEEK=$(jq -r '.seven_day.utilization // empty' "$CACHE" 2>/dev/null)
+    WEEK_ISO=$(jq -r '.seven_day.resets_at // empty' "$CACHE" 2>/dev/null)
+
+    if [ -n "$FIVE_H_ISO" ]; then
+        FIVE_H_RESET=$(iso_to_epoch "$FIVE_H_ISO")
+    fi
+    if [ -n "$WEEK_ISO" ]; then
+        WEEK_RESET=$(iso_to_epoch "$WEEK_ISO")
+    fi
+fi
+
+# Model's own weekly usage: the weekly_scoped row in the cached usage
+# response whose scope.model.display_name matches the current model
+# (case-insensitively, by id-contains or display-name-startswith). Hidden
+# (name only) when disabled, no model, fetch failed, or no matching row.
+MODEL_PCT=""
+MODEL_RESET=""
+if [ "$NEED_MODEL_LIMIT" = true ] && [ -f "$CACHE" ]; then
+    MODEL_LIMIT_TSV=$(jq -r --arg id "$MODEL_ID" --arg disp "$MODEL_DISPLAY" '
+        def matches(row):
+            (row.scope.model.display_name // "" | ascii_downcase) as $n
+            | $n != "" and (
+                if ($disp != "") then ($disp | ascii_downcase | startswith($n))
+                else ($id | ascii_downcase | contains($n)) end
+              );
+        ((.limits // []) | map(select(.kind == "weekly_scoped" and matches(.) and ((.percent | type) == "number"))))[0] as $row
+        | if $row == null then empty
+          else [($row.percent | if . < 0 then 0 elif . > 999 then 999 else . end | tostring), ($row.resets_at // "")] | @tsv
+          end
+    ' "$CACHE" 2>/dev/null)
+
+    if [ -n "$MODEL_LIMIT_TSV" ]; then
+        IFS=$'\t' read -r MODEL_PCT MODEL_RESET_ISO <<<"$MODEL_LIMIT_TSV"
+        if [ -n "$MODEL_RESET_ISO" ]; then
+            MODEL_RESET=$(iso_to_epoch "$MODEL_RESET_ISO")
         fi
     fi
 fi
@@ -93,6 +178,7 @@ NOW=$(date +%s)
 CYAN='\033[36m'
 GRAY='\033[90m'
 SAGE='\033[38;5;108m'
+MAGENTA='\033[35m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
 RED='\033[31m'
@@ -139,6 +225,20 @@ DUR_SEC=$((DUR_MS / 1000))
 DUR_FMT=$(format_duration "$DUR_SEC")
 
 LINE="${CYAN}${DIR_DISPLAY}${RESET}"
+
+if [ -n "$MODEL_NAME" ]; then
+    LINE="${LINE} | ${MAGENTA}${MODEL_NAME}${RESET}"
+    if [ -n "$MODEL_PCT" ]; then
+        MODEL_PCT_INT=$(printf '%.0f' "$MODEL_PCT")
+        MODEL_PCT_COLOR=$(color_for_pct "$MODEL_PCT_INT")
+        LINE="${LINE} ${MODEL_PCT_COLOR}${MODEL_PCT_INT}%${RESET}"
+        if [ -n "$MODEL_RESET" ]; then
+            DIFF=$((MODEL_RESET - NOW))
+            LINE="${LINE} ${GRAY}($(format_duration "$DIFF"))${RESET}"
+        fi
+    fi
+fi
+
 LINE="${LINE} | ${YELLOW}${COST_FMT}${RESET}"
 
 if [ "$LINES_ADD" -gt 0 ] || [ "$LINES_DEL" -gt 0 ]; then
@@ -161,7 +261,7 @@ fi
 if [ -n "$WEEK" ]; then
     WEEK_INT=$(printf '%.0f' "$WEEK")
     WEEK_COLOR=$(color_for_pct "$WEEK_INT")
-    SEG="${WEEK_COLOR}7d:${WEEK_INT}%${RESET}"
+    SEG="${WEEK_COLOR}w:${WEEK_INT}%${RESET}"
     if [ -n "$WEEK_RESET" ]; then
         DIFF=$((WEEK_RESET - NOW))
         SEG="${SEG} ${GRAY}($(format_duration "$DIFF"))${RESET}"

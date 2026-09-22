@@ -5,8 +5,14 @@
 # Safety: runs statusline.sh with tests/stubs (fake `security`/`curl`) first
 # on PATH, and HOME / CLAUDE_STATUSLINE_CACHE_DIR pointed at a temp dir, so
 # it never touches the real Keychain, network, or ~/.claude/cache. All
-# fixtures below embed rate_limits directly, so the fallback path (and the
-# stubs) never actually fire -- they're there only as defense in depth.
+# fixtures below embed rate_limits directly, so the 5h/w fallback path never
+# actually fires for those segments -- it's there only as defense in depth.
+# The `security`/`curl` stubs do fire for fixture A, on purpose: it serves a
+# canned usage-endpoint response through the curl stub so its model segment
+# can show the per-model weekly-usage part (that part has no stdin field to
+# embed; see CLAUDE_STATUSLINE_MODEL_LIMIT in README.md). The stubs are
+# disabled (via CLAUDE_STATUSLINE_MODEL_LIMIT=0) for fixtures B and C, so
+# their model segments don't depend on fixture A's cached response.
 #
 # Usage:
 #   docs/render-screenshot.sh            # writes docs/screenshot.html only
@@ -32,9 +38,22 @@ mkdir -p "$FAKE_HOME" "$CACHE_DIR"
 now=$(date +%s)
 
 render_line() {
-    # $1 = fixture JSON on stdin (via file), prints raw (ANSI) statusline output
-    local fixture="$1"
+    # $1 = fixture JSON on stdin (via file), prints raw (ANSI) statusline
+    # output. $2 = optional usage-endpoint response file, served through the
+    # curl stub for this render only, so the model segment's per-model
+    # weekly-usage part can be shown (it has no stdin field of its own).
+    # When $2 is omitted, the per-model fetch is disabled outright for this
+    # render (rather than left to fall through to whatever is in the shared
+    # cache dir), so fixtures B/C never depend on fixture A's cached
+    # response.
+    local fixture="$1" usage_response="${2:-}"
+    local model_limit=1
+    if [ -z "$usage_response" ]; then
+        model_limit=0
+    fi
     PATH="$STUBS_DIR:$PATH" HOME="$FAKE_HOME" CLAUDE_STATUSLINE_CACHE_DIR="$CACHE_DIR" \
+        STUB_CURL_RESPONSE_FILE="$usage_response" STUB_SECURITY_TOKEN="stub-token" \
+        CLAUDE_STATUSLINE_MODEL_LIMIT="$model_limit" \
         "$STATUSLINE" < "$fixture"
 }
 
@@ -48,6 +67,7 @@ render_line() {
 fixture_a="$WORK_DIR/a.json"
 jq -n --argjson five_reset $((now + 1*3600 + 39*60 + 30)) --argjson week_reset $((now + 3*86400 + 6*3600 + 1800)) '{
   workspace: { current_dir: "/home/user/.claude" },
+  model: { id: "claude-fable-5-1", display_name: "Fable 5.1" },
   cost: { total_cost_usd: 0, total_duration_ms: 6000, total_lines_added: 0, total_lines_removed: 0 },
   context_window: { used_percentage: 0 },
   rate_limits: {
@@ -56,11 +76,30 @@ jq -n --argjson five_reset $((now + 1*3600 + 39*60 + 30)) --argjson week_reset $
   }
 }' > "$fixture_a"
 
+# Usage-endpoint response for fixture A's model segment: same shape as
+# tests/fixtures/usage-limits.json (a weekly_scoped row for "Fable"), but
+# with resets_at generated from `now` so the screenshot shows a realistic
+# countdown instead of a multi-decade one. Served through the curl stub only
+# while rendering fixture A (see render_line's $2 above).
+fixture_a_usage="$WORK_DIR/a-usage.json"
+jq -n --argjson model_reset $((now + 2*86400 + 21*3600 + 1800)) '{
+  five_hour: { utilization: 23, resets_at: "2099-01-01T00:00:00.000000+00:00" },
+  seven_day: { utilization: 37, resets_at: "2099-01-01T00:00:00.000000+00:00" },
+  limits: [
+    {
+      kind: "weekly_scoped", group: "weekly", percent: 80, severity: "warning", is_active: true,
+      resets_at: (($model_reset | gmtime | strftime("%Y-%m-%dT%H:%M:%S")) + ".000000+00:00"),
+      scope: { model: { display_name: "Fable" }, surface: null }
+    }
+  ]
+}' > "$fixture_a_usage"
+
 # --- Fixture B: with the +add/-del lines segment ----------------------------
 # Same margin reasoning as fixture A; must keep matching README.md.
 fixture_b="$WORK_DIR/b.json"
 jq -n --argjson five_reset $((now + 4*3600 + 51*60 + 30)) --argjson week_reset $((now + 6*86400 + 22*3600 + 1800)) '{
   workspace: { current_dir: "/home/user/projects/myproj" },
+  model: { id: "claude-sonnet-5", display_name: "Sonnet 5" },
   cost: { total_cost_usd: 0.42, total_duration_ms: 192000, total_lines_added: 12, total_lines_removed: 3 },
   context_window: { used_percentage: 18 },
   rate_limits: {
@@ -73,6 +112,7 @@ jq -n --argjson five_reset $((now + 4*3600 + 51*60 + 30)) --argjson week_reset $
 fixture_c="$WORK_DIR/c.json"
 jq -n --argjson five_reset $((now + 45*60)) --argjson week_reset $((now + 2*86400 + 5*3600)) '{
   workspace: { current_dir: "/home/user/projects/bigproject" },
+  model: { id: "claude-opus-5", display_name: "Opus 5" },
   cost: { total_cost_usd: 2.15, total_duration_ms: 932000, total_lines_added: 0, total_lines_removed: 0 },
   context_window: { used_percentage: 91 },
   rate_limits: {
@@ -81,7 +121,7 @@ jq -n --argjson five_reset $((now + 45*60)) --argjson week_reset $((now + 2*8640
   }
 }' > "$fixture_c"
 
-raw_a=$(render_line "$fixture_a")
+raw_a=$(render_line "$fixture_a" "$fixture_a_usage")
 raw_b=$(render_line "$fixture_b")
 raw_c=$(render_line "$fixture_c")
 
@@ -92,6 +132,7 @@ ansi_to_html() {
         s/\e\[36m/<span style="color:#00cdcd">/g;             # cyan   (dir)
         s/\e\[90m/<span style="color:#7f7f7f">/g;              # gray   (separators)
         s/\e\[38;5;108m/<span style="color:#87af87">/g;        # sage   (duration)
+        s/\e\[35m/<span style="color:#cd00cd">/g;              # magenta (model)
         s/\e\[32m/<span style="color:#00cd00">/g;              # green  (+lines / low pct)
         s/\e\[33m/<span style="color:#cdcd00">/g;              # yellow (cost / mid pct)
         s/\e\[31m/<span style="color:#cd0000">/g;              # red    (-lines / high pct)
