@@ -1,3 +1,5 @@
+**English** | [Русский](README.ru.md)
+
 # claude-code-statusline
 
 [![CI](https://github.com/kskadart/claude-code-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/kskadart/claude-code-statusline/actions/workflows/ci.yml)
@@ -10,14 +12,6 @@ and the clock. You install it as a single script plus one line in
 `settings.json`.
 
 ![Status line screenshot](docs/screenshot.png)
-
-## По-русски
-
-Строка состояния для Claude Code. Она появляется под чатом при каждом
-рендере и показывает папку проекта, стоимость сессии и заполнение окна
-контекста. Также видно расход 5-часового и недельного лимита, время до их
-сброса, длительность сессии и часы. Устанавливается одним файлом скрипта и
-одной строкой в `settings.json`.
 
 ## Example
 
