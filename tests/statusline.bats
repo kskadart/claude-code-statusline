@@ -109,18 +109,18 @@ file_mode() {
     [[ "$clean" != *"+0/-0"* ]]
 
     # Segment order via a single regex over the whole line.
-    [[ "$clean" =~ myproj\ \|\ Fable\ 5\.1\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%.*\ \|\ w:37%.*\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2} ]]
+    [[ "$clean" =~ myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%.*\ \|\ w:37%.*\ \|\ Fable\ 5\.1\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2} ]]
 
     # No fallback path should have been taken: rate_limits came from stdin.
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
     [ ! -d "$TEST_CACHE_DIR" ]
 }
 
-@test "model segment (display_name) is shown as the 2nd segment, right after dir" {
+@test "model segment (display_name) is shown after the weekly segment, before duration" {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Fable 5.1 | "* ]]
+    [[ "$clean" == *" | w:37% ("*" | Fable 5.1 | "*" | 1h1m | "* ]]
     [[ "$output" == *$'\033[35mFable 5.1'* ]]
 }
 
@@ -128,7 +128,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/model-id-only.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "modelid | claude-sonnet-5 | "* ]]
+    [[ "$clean" == *" | w:9% ("*" | claude-sonnet-5 | "* ]]
 }
 
 @test "no model field: model segment is hidden entirely (exact expected line)" {
@@ -145,7 +145,7 @@ file_mode() {
     run_statusline "$fixture"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | claude-sonnet-5 | "* ]]
+    [[ "$clean" == *" | w:37% ("*" | claude-sonnet-5 | "* ]]
 }
 
 @test "model is null: segment hidden" {
@@ -300,18 +300,18 @@ file_mode() {
     [ -n "$clean" ]
 }
 
-@test "model weekly usage: shown after model name, general w: still comes from stdin" {
+@test "model weekly usage: shown after the weekly segment, general w: still comes from stdin" {
     export STUB_SECURITY_TOKEN="stub-token"
     export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/usage-limits.json"
 
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Fable 5.1 80% ("* ]]
     # The general weekly segment still comes from stdin's rate_limits.seven_day
     # (37%), not from the usage endpoint's seven_day.utilization (12) or its
-    # weekly_all row (44).
-    [[ "$clean" == *" | w:37% ("* ]]
+    # weekly_all row (44), and the model segment (with its own weekly usage)
+    # directly follows it.
+    [[ "$clean" == *" | w:37% ("*" | Fable 5.1 80% ("* ]]
     [[ "$output" == *$'\033[33m80%'* ]]
 }
 
@@ -329,7 +329,7 @@ file_mode() {
     run_statusline "$fixture"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Haiku 4.5 | \$1.23 | "* ]]
+    [[ "$clean" == *" | w:37% ("*" | Haiku 4.5 | "* ]]
     # Proves the fetch path actually ran (and simply found no match), not
     # that it was skipped.
     [ -f "$STUB_CURL_CALLED_MARKER" ]
@@ -348,7 +348,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/model-id-only.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "modelid | claude-sonnet-5 42% ("* ]]
+    [[ "$clean" == *" | w:9% ("*" | claude-sonnet-5 42% ("* ]]
 }
 
 @test "model weekly usage: curl returns nothing -> name only, still exits 0" {
@@ -360,7 +360,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Fable 5.1 | \$1.23 | "* ]]
+    [[ "$clean" == *" | w:37% ("*" | Fable 5.1 | "* ]]
     # Proves the fetch path actually ran (and got an empty response), not
     # that it was skipped.
     [ -f "$STUB_CURL_CALLED_MARKER" ]
@@ -411,7 +411,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Fable 5.1 | "* ]]
+    [[ "$clean" == *" | w:37% ("*" | Fable 5.1 | "* ]]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
 }
 
@@ -423,7 +423,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Fable 5.1 | \$1.23 | "* ]]
+    [[ "$clean" == *" | w:37% ("*" | Fable 5.1 | "* ]]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
 }
 
@@ -446,7 +446,7 @@ file_mode() {
     [ "$status" -eq 0 ]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" == "myproj | Fable 5.1 80% ("* ]]
+    [[ "$clean" == *" | w:37% ("*" | Fable 5.1 80% ("* ]]
 }
 
 @test "high ctx (95%) is colored red before rendering" {

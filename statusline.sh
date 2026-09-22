@@ -2,7 +2,7 @@
 # Claude Code statusline with real-time Max/Pro rate-limit data.
 #
 # Layout:
-#   dir | model [N% (reset)] | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:N% (reset) | session_duration | time
+#   dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:N% (reset) | model [N% (reset)] | session_duration | time
 #
 # Rate-limit strategy:
 #   1. Prefer Claude Code's built-in rate_limits field (future-proof if the bug is fixed)
@@ -226,19 +226,6 @@ DUR_FMT=$(format_duration "$DUR_SEC")
 
 LINE="${CYAN}${DIR_DISPLAY}${RESET}"
 
-if [ -n "$MODEL_NAME" ]; then
-    LINE="${LINE} | ${MAGENTA}${MODEL_NAME}${RESET}"
-    if [ -n "$MODEL_PCT" ]; then
-        MODEL_PCT_INT=$(printf '%.0f' "$MODEL_PCT")
-        MODEL_PCT_COLOR=$(color_for_pct "$MODEL_PCT_INT")
-        LINE="${LINE} ${MODEL_PCT_COLOR}${MODEL_PCT_INT}%${RESET}"
-        if [ -n "$MODEL_RESET" ]; then
-            DIFF=$((MODEL_RESET - NOW))
-            LINE="${LINE} ${GRAY}($(format_duration "$DIFF"))${RESET}"
-        fi
-    fi
-fi
-
 LINE="${LINE} | ${YELLOW}${COST_FMT}${RESET}"
 
 if [ "$LINES_ADD" -gt 0 ] || [ "$LINES_DEL" -gt 0 ]; then
@@ -267,6 +254,19 @@ if [ -n "$WEEK" ]; then
         SEG="${SEG} ${GRAY}($(format_duration "$DIFF"))${RESET}"
     fi
     LINE="${LINE} | ${SEG}"
+fi
+
+if [ -n "$MODEL_NAME" ]; then
+    LINE="${LINE} | ${MAGENTA}${MODEL_NAME}${RESET}"
+    if [ -n "$MODEL_PCT" ]; then
+        MODEL_PCT_INT=$(printf '%.0f' "$MODEL_PCT")
+        MODEL_PCT_COLOR=$(color_for_pct "$MODEL_PCT_INT")
+        LINE="${LINE} ${MODEL_PCT_COLOR}${MODEL_PCT_INT}%${RESET}"
+        if [ -n "$MODEL_RESET" ]; then
+            DIFF=$((MODEL_RESET - NOW))
+            LINE="${LINE} ${GRAY}($(format_duration "$DIFF"))${RESET}"
+        fi
+    fi
 fi
 
 LINE="${LINE} | ${SAGE}${DUR_FMT}${RESET}"

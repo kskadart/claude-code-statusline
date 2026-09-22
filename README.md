@@ -16,14 +16,14 @@ plus one line in `settings.json`.
 ## Example
 
 ```
-.claude | Fable 5.1 80% (2d21h) | $0.00 | ctx:0% | 5h:23% (1h39m) | w:37% (3d6h) | 6s | 12:30:13
+.claude | $0.00 | ctx:0% | 5h:23% (1h39m) | w:37% (3d6h) | Fable 5.1 80% (2d21h) | 6s | 12:30:13
 ```
 
 The `+add/-del` segment appears only when the session has added or removed
 lines:
 
 ```
-myproj | Sonnet 5 | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m12s | 09:04:21
+myproj | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | Sonnet 5 | 3m12s | 09:04:21
 ```
 
 ## What each segment means
@@ -31,12 +31,12 @@ myproj | Sonnet 5 | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m
 | Segment | Source (stdin JSON field) | Meaning | Color thresholds |
 |---|---|---|---|
 | dir | `workspace.current_dir` | Last path component; `~` if it equals `$HOME` | cyan, no thresholds |
-| model | `model.display_name` (falls back to `model.id`); percent/reset from the usage endpoint's `limits[]` | Current Claude model name, plus that model's own weekly usage and time to reset in parentheses; hidden entirely when both name fields are absent or empty; the percent/reset part is hidden when the model-limit fetch is disabled, fails, has no cache yet, or has no matching row for this model | name magenta, no thresholds; percent green <70, yellow 70-89, red ≥90 |
 | cost | `cost.total_cost_usd` | Session cost so far, `$X.XX` | yellow, no thresholds |
 | `+add/-del` | `cost.total_lines_added` / `total_lines_removed` | Lines changed this session; hidden when both are 0 | green `+`, red `-` |
 | ctx | `context_window.used_percentage` | Context window fill | green <70, yellow 70-89, red ≥90 |
 | 5h | `rate_limits.five_hour.used_percentage`, `resets_at` | 5-hour rate limit usage and time to reset (`XdYh` / `XhYm` / `XmYs` / `Xs` / `now`) | green <70, yellow 70-89, red ≥90 |
 | w | `rate_limits.seven_day.used_percentage`, `resets_at` | Weekly (7-day) rate limit usage and time to reset | green <70, yellow 70-89, red ≥90 |
+| model | `model.display_name` (falls back to `model.id`); percent/reset from the usage endpoint's `limits[]` | Current Claude model name, plus that model's own weekly usage and time to reset in parentheses; hidden entirely when both name fields are absent or empty; the percent/reset part is hidden when the model-limit fetch is disabled, fails, has no cache yet, or has no matching row for this model | name magenta, no thresholds; percent green <70, yellow 70-89, red ≥90 |
 | duration | `cost.total_duration_ms` | Session wall-clock duration | sage, no thresholds |
 | clock | local `date` | Current local time | orange, no thresholds |
 
