@@ -8,11 +8,11 @@
 # fixtures below embed rate_limits directly, so the 5h/w fallback path never
 # actually fires for those segments -- it's there only as defense in depth.
 # The `security`/`curl` stubs do fire for fixture A, on purpose: it serves a
-# canned usage-endpoint response through the curl stub so its model segment
-# can show the per-model weekly-usage part (that part has no stdin field to
-# embed; see CLAUDE_STATUSLINE_MODEL_LIMIT in README.md). The stubs are
-# disabled (via CLAUDE_STATUSLINE_MODEL_LIMIT=0) for fixtures B and C, so
-# their model segments don't depend on fixture A's cached response.
+# canned usage-endpoint response through the curl stub so its w: segment can
+# show the per-model weekly-usage part after the gray "/" (that part has no
+# stdin field to embed; see CLAUDE_STATUSLINE_MODEL_LIMIT in README.md). The
+# stubs are disabled (via CLAUDE_STATUSLINE_MODEL_LIMIT=0) for fixtures B
+# and C, so their w: segments don't depend on fixture A's cached response.
 #
 # Usage:
 #   docs/render-screenshot.sh            # writes docs/screenshot.html only
@@ -40,7 +40,7 @@ now=$(date +%s)
 render_line() {
     # $1 = fixture JSON on stdin (via file), prints raw (ANSI) statusline
     # output. $2 = optional usage-endpoint response file, served through the
-    # curl stub for this render only, so the model segment's per-model
+    # curl stub for this render only, so the w: segment's per-model
     # weekly-usage part can be shown (it has no stdin field of its own).
     # When $2 is omitted, the per-model fetch is disabled outright for this
     # render (rather than left to fall through to whatever is in the shared
@@ -79,7 +79,7 @@ jq -n --argjson five_reset "$five_reset" --argjson week_reset "$week_reset" '{
   }
 }' > "$fixture_a"
 
-# Usage-endpoint response for fixture A's model segment: same shape as
+# Usage-endpoint response for fixture A's w: segment: same shape as
 # tests/fixtures/usage-limits.json (a weekly_scoped row for "Fable"), with
 # resets_at set to the *same instant* as fixture A's own seven_day.resets_at
 # above (round-tripped through gmtime|strftime, the same ISO shape

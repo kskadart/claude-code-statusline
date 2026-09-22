@@ -2,7 +2,11 @@
 # Claude Code statusline with real-time Max/Pro rate-limit data.
 #
 # Layout:
-#   dir | model | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:ALL%/MODEL% (reset) | session_duration | time
+#   dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:ALL%/MODEL% (reset) | session_duration | time
+#
+# The model isn't its own segment: its identity is conveyed only by the
+# second value of the w: segment (the current model's own weekly usage,
+# after a gray "/").
 #
 # Rate-limit strategy:
 #   1. Prefer Claude Code's built-in rate_limits field (future-proof if the bug is fixed)
@@ -39,9 +43,11 @@ fi
 
 # Model name/id: one jq call extracts both raw fields (empty string when
 # absent/null/not-a-string), silently on malformed input. Display name wins,
-# falling back to id; MODEL_NAME is empty (segment hidden) when neither is a
-# non-empty string. MODEL_DISPLAY/MODEL_ID (raw) are also used later to match
-# the model's own weekly-limit row from the usage endpoint.
+# falling back to id; MODEL_NAME is empty when neither is a non-empty
+# string. The model name itself is never rendered; MODEL_NAME gates whether
+# the per-model weekly-usage fetch runs at all, and MODEL_DISPLAY/MODEL_ID
+# (raw) are used later to match the model's own weekly-limit row from the
+# usage endpoint.
 MODEL_TSV=$(printf '%s' "$input" | jq -r '
     def pick(f): ([f] | map(select(type == "string" and . != ""))) as $vals
         | if ($vals | length) > 0 then $vals[0] else "" end;
@@ -208,7 +214,6 @@ NOW=$(date +%s)
 CYAN='\033[36m'
 GRAY='\033[90m'
 SAGE='\033[38;5;108m'
-MAGENTA='\033[35m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
 RED='\033[31m'
@@ -255,10 +260,6 @@ DUR_SEC=$((DUR_MS / 1000))
 DUR_FMT=$(format_duration "$DUR_SEC")
 
 LINE="${CYAN}${DIR_DISPLAY}${RESET}"
-
-if [ -n "$MODEL_NAME" ]; then
-    LINE="${LINE} | ${MAGENTA}${MODEL_NAME}${RESET}"
-fi
 
 LINE="${LINE} | ${YELLOW}${COST_FMT}${RESET}"
 

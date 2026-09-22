@@ -5,18 +5,18 @@
 [![CI](https://github.com/kskadart/claude-code-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/kskadart/claude-code-statusline/actions/workflows/ci.yml)
 
 A status line for [Claude Code](https://claude.com/claude-code). It runs on
-every render, below the chat, and shows the project folder, the current
-model name, session cost, and context window usage. It also shows how much
-of your 5-hour and 7-day rate limit you've used, when each one resets, how
-long the session has run, and the clock. You install it as a single script
-plus one line in `settings.json`.
+every render, below the chat, and shows the project folder, session cost,
+and context window usage. It also shows how much of your 5-hour and 7-day
+rate limit you've used, when each one resets, how long the session has run,
+and the clock. You install it as a single script plus one line in
+`settings.json`.
 
 ![Status line screenshot](docs/screenshot.png)
 
 ## Example
 
 ```
-.claude | Fable 5.1 | $0.00 | ctx:0% | 5h:23% (1h39m) | w:37%/80% (3d6h) | 6s | 12:30:13
+.claude | $0.00 | ctx:0% | 5h:23% (1h39m) | w:37%/80% (3d6h) | 6s | 12:30:13
 ```
 
 The `+add/-del` segment appears only when the session has added or removed
@@ -24,7 +24,7 @@ lines; here the model has no weekly-usage row of its own, so `w` shows only
 the all-model value:
 
 ```
-myproj | Sonnet 5 | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m12s | 09:04:21
+myproj | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m12s | 09:04:21
 ```
 
 ## What each segment means
@@ -32,7 +32,6 @@ myproj | Sonnet 5 | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m
 | Segment | Source (stdin JSON field) | Meaning | Color thresholds |
 |---|---|---|---|
 | dir | `workspace.current_dir` | Last path component; `~` if it equals `$HOME` | cyan, no thresholds |
-| model | `model.display_name` (falls back to `model.id`) | Current Claude model name; hidden entirely when both name fields are absent or empty | magenta, no thresholds |
 | cost | `cost.total_cost_usd` | Session cost so far, `$X.XX` | yellow, no thresholds |
 | `+add/-del` | `cost.total_lines_added` / `total_lines_removed` | Lines changed this session; hidden when both are 0 | green `+`, red `-` |
 | ctx | `context_window.used_percentage` | Context window fill | green <70, yellow 70-89, red ≥90 |
@@ -92,10 +91,13 @@ even trying, since `security` isn't on PATH there).
    delete the fallback block from the script — the stdin path keeps
    working on its own.
 
-3. The current model's own weekly usage (shown in the `w:` segment after a
-   gray `/`) is not part of stdin at all — Claude Code's `rate_limits`
-   field has no per-model breakdown. Whenever a model name is known, the
-   script fetches this from the same
+3. The current model's own weekly usage — the second value of the `w:`
+   segment, after a gray `/` — is not part of stdin at all — Claude Code's
+   `rate_limits` field has no per-model breakdown. The script identifies
+   the current model from stdin's `model.display_name`/`model.id` (the
+   model name itself is never displayed, only used for this matching).
+   Whenever a model name is known, the script fetches the weekly usage from
+   the same
    `https://api.anthropic.com/api/oauth/usage` response's `limits[]` array
    (same OAuth token, same unofficial-endpoint caveat as above), at most
    once per render, and picks the entry that scopes to the current model.
