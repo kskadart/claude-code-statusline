@@ -313,12 +313,25 @@ if [ -n "$WEEK" ] || [ -n "$MODEL_PCT" ]; then
         fi
     fi
 
+    if [ -n "$WEEK" ] && [ -n "$MODEL_PCT" ]; then
+        if [ "$WEEK_INT" -ge "$MODEL_PCT_INT" ]; then
+            MAX_INT="$WEEK_INT"
+        else
+            MAX_INT="$MODEL_PCT_INT"
+        fi
+    elif [ -n "$WEEK" ]; then
+        MAX_INT="$WEEK_INT"
+    else
+        MAX_INT="$MODEL_PCT_INT"
+    fi
+    LABEL_COLOR=$(color_for_pct "$MAX_INT")
+
     if [ "$SPLIT_RESETS" = true ]; then
         WEEK_VAL="${WEEK_VAL} ${GRAY}($(format_duration $((WEEK_RESET - NOW))))${RESET}"
         MODEL_VAL="${MODEL_VAL} ${GRAY}($(format_duration $((MODEL_RESET - NOW))))${RESET}"
-        SEG="w:${WEEK_VAL}${MODEL_VAL}"
+        SEG="${LABEL_COLOR}w:${RESET}${WEEK_VAL}${MODEL_VAL}"
     else
-        SEG="w:${WEEK_VAL}${MODEL_VAL}"
+        SEG="${LABEL_COLOR}w:${RESET}${WEEK_VAL}${MODEL_VAL}"
         RESET_AT=""
         if [ -n "$WEEK_RESET" ]; then
             RESET_AT="$WEEK_RESET"

@@ -359,6 +359,9 @@ file_mode() {
     # is far-future, so the two windows differ by more than 60s and each
     # gets its own countdown (the two-countdown form).
     [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    # The w: label takes the worse of the two colors: 37% is green but 80%
+    # is yellow, so the label itself renders yellow.
+    [[ "$output" == *$'\033[33mw:'* ]]
     [[ "$output" == *$'\033[32m37%'* ]]
     [[ "$output" == *$'\033[33m80%'* ]]
 }
@@ -504,6 +507,25 @@ file_mode() {
     clean=$(strip_ansi "$output")
     [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
+    # Only the all-model value (37%, green) is known, so the label takes its
+    # color.
+    [[ "$output" == *$'\033[32mw:'* ]]
+}
+
+@test "w: label takes the worse (higher) color when the model's own usage is lower than all-model" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/usage-limits.json"
+
+    local fixture="$BATS_TEST_TMPDIR/full-week-95.json"
+    jq '.rate_limits.seven_day.used_percentage = 95' "$FIXTURES_DIR/full.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    # All-model weekly (95%) is red and worse than the model's own weekly
+    # (80%, yellow), so the w: label renders red.
+    [[ "$output" == *$'\033[31mw:'* ]]
+    [[ "$output" == *$'\033[31m95%'* ]]
+    [[ "$output" == *$'\033[33m80%'* ]]
 }
 
 @test "model weekly usage: cache is reused within TTL, curl called once" {
