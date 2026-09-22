@@ -16,14 +16,15 @@ plus one line in `settings.json`.
 ## Example
 
 ```
-.claude | $0.00 | ctx:0% | 5h:23% (1h39m) | w:37% (3d6h) | Fable 5.1 80% (2d21h) | 6s | 12:30:13
+.claude | Fable 5.1 | $0.00 | ctx:0% | 5h:23% (1h39m) | w:37%/80% (3d6h) | 6s | 12:30:13
 ```
 
 The `+add/-del` segment appears only when the session has added or removed
-lines:
+lines; here the model has no weekly-usage row of its own, so `w` shows only
+the all-model value:
 
 ```
-myproj | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | Sonnet 5 | 3m12s | 09:04:21
+myproj | Sonnet 5 | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m12s | 09:04:21
 ```
 
 ## What each segment means
@@ -31,12 +32,12 @@ myproj | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | Sonnet 5 | 3m
 | Segment | Source (stdin JSON field) | Meaning | Color thresholds |
 |---|---|---|---|
 | dir | `workspace.current_dir` | Last path component; `~` if it equals `$HOME` | cyan, no thresholds |
+| model | `model.display_name` (falls back to `model.id`) | Current Claude model name; hidden entirely when both name fields are absent or empty | magenta, no thresholds |
 | cost | `cost.total_cost_usd` | Session cost so far, `$X.XX` | yellow, no thresholds |
 | `+add/-del` | `cost.total_lines_added` / `total_lines_removed` | Lines changed this session; hidden when both are 0 | green `+`, red `-` |
 | ctx | `context_window.used_percentage` | Context window fill | green <70, yellow 70-89, red ≥90 |
 | 5h | `rate_limits.five_hour.used_percentage`, `resets_at` | 5-hour rate limit usage and time to reset (`XdYh` / `XhYm` / `XmYs` / `Xs` / `now`) | green <70, yellow 70-89, red ≥90 |
-| w | `rate_limits.seven_day.used_percentage`, `resets_at` | Weekly (7-day) rate limit usage and time to reset | green <70, yellow 70-89, red ≥90 |
-| model | `model.display_name` (falls back to `model.id`); percent/reset from the usage endpoint's `limits[]` | Current Claude model name, plus that model's own weekly usage and time to reset in parentheses; hidden entirely when both name fields are absent or empty; the percent/reset part is hidden when the model-limit fetch is disabled, fails, has no cache yet, or has no matching row for this model | name magenta, no thresholds; percent green <70, yellow 70-89, red ≥90 |
+| w | `rate_limits.seven_day.used_percentage`, `resets_at` (all models); the usage endpoint's `limits[]` (current model) | Weekly rate limit usage: all models, then `/` and the current model's own weekly usage when the usage endpoint reports one; one reset countdown when both windows reset together, otherwise one per value; hidden entirely when neither value is known; renders `w:-/NN%` (the `-` gray) when only the model's own value is known | all-model percent green <70, yellow 70-89, red ≥90; the `/` separator and any `-` gray; model percent by its own thresholds |
 | duration | `cost.total_duration_ms` | Session wall-clock duration | sage, no thresholds |
 | clock | local `date` | Current local time | orange, no thresholds |
 
@@ -70,8 +71,8 @@ even trying, since `security` isn't on PATH there).
 - `CLAUDE_STATUSLINE_CACHE_DIR` — where the fallback rate-limit cache is
   written. Default: `~/.claude/cache`.
 - `CLAUDE_STATUSLINE_MODEL_LIMIT` — set to `0` to disable the per-model
-  weekly-usage fetch described below and show only the model name. Default:
-  enabled.
+  weekly-usage fetch described below and show only the all-model `w:` value.
+  Default: enabled.
 
 ## How rate limits are obtained
 
@@ -91,23 +92,33 @@ even trying, since `security` isn't on PATH there).
    delete the fallback block from the script — the stdin path keeps
    working on its own.
 
-3. The model segment's own weekly usage (the `NN% (reset)` shown right
-   after the model name) is not part of stdin at all — Claude Code's
-   `rate_limits` field has no per-model breakdown. Whenever a model name is
-   known, the script fetches this from the same
+3. The current model's own weekly usage (shown in the `w:` segment after a
+   gray `/`) is not part of stdin at all — Claude Code's `rate_limits`
+   field has no per-model breakdown. Whenever a model name is known, the
+   script fetches this from the same
    `https://api.anthropic.com/api/oauth/usage` response's `limits[]` array
-   (same OAuth token, same 60s cache, same unofficial-endpoint caveat as
-   above), at most once per render, and picks the entry that scopes to the
-   current model. The matching rule: the first `limits[]` entry with
-   `kind == "weekly_scoped"` whose `scope.model.display_name` matches the
-   current model case-insensitively (the stdin `model.display_name` starts
-   with it; if there is no display name, `model.id` contains it). Set
+   (same OAuth token, same unofficial-endpoint caveat as above), at most
+   once per render, and picks the entry that scopes to the current model.
+   When stdin already provided `rate_limits` (so this fetch is the only
+   reason to call the endpoint), the cache TTL is 300s instead of 60s, so
+   the model's weekly usage is refreshed at most every 5 minutes. The
+   matching rule: the first `limits[]` entry with `kind == "weekly_scoped"`
+   whose `scope.model.display_name` matches the current model
+   case-insensitively (the stdin `model.display_name` starts with it; if
+   there is no display name, `model.id` contains it). Set
    `CLAUDE_STATUSLINE_MODEL_LIMIT=0` to disable this fetch and show only
-   the model name, as before this feature existed.
+   the all-model `w:` value, as before this feature existed.
 
    curl honors `HTTPS_PROXY`/`CURL_CA_BUNDLE`; behind a TLS-intercepting
    proxy, give curl the proxy's CA via `CURL_CA_BUNDLE`, otherwise the
-   fetch fails silently and only the model name is shown.
+   fetch fails silently and only the all-model `w:` value is shown.
+
+4. A failed fetch (no token, curl error, invalid JSON) leaves a
+   `statusline-ratelimit.json.fail` marker (mode `600`) next to the cache,
+   so the script backs off and doesn't retry until that marker is older
+   than the same TTL that applies to the cache; a successful fetch clears
+   it. An existing, older cache is still used for rendering even while a
+   refresh is skipped or fails.
 
 ## Design notes
 

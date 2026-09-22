@@ -2,18 +2,26 @@
 # Claude Code statusline with real-time Max/Pro rate-limit data.
 #
 # Layout:
-#   dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:N% (reset) | model [N% (reset)] | session_duration | time
+#   dir | model | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:ALL%/MODEL% (reset) | session_duration | time
 #
 # Rate-limit strategy:
 #   1. Prefer Claude Code's built-in rate_limits field (future-proof if the bug is fixed)
 #      for the 5h/w segments.
 #   2. Fall back to direct query of https://api.anthropic.com/api/oauth/usage using the
 #      OAuth token from macOS Keychain (Claude Code-credentials), cached to
-#      $HOME/.claude/cache/statusline-ratelimit.json for 60s to avoid spamming the endpoint.
-#      Override the cache directory with CLAUDE_STATUSLINE_CACHE_DIR.
-#   3. The model segment's own weekly usage (shown right after the model name) is not in
+#      $HOME/.claude/cache/statusline-ratelimit.json for 60s (when the fallback itself is
+#      needed) to avoid spamming the endpoint. Override the cache directory with
+#      CLAUDE_STATUSLINE_CACHE_DIR.
+#   3. The model's own weekly usage (shown in the w: segment after a gray "/") is not in
 #      stdin; it is read from the same usage endpoint/cache, fetched at most once per
-#      render whenever a model name is known. Disable with CLAUDE_STATUSLINE_MODEL_LIMIT=0.
+#      render whenever a model name is known. When that per-model fetch is the only reason
+#      to talk to the endpoint (stdin already had rate_limits), the cache TTL is 300s
+#      instead of 60s, so it's refreshed at most every 5 minutes. Disable with
+#      CLAUDE_STATUSLINE_MODEL_LIMIT=0.
+#   4. A failed fetch (no token, curl error, invalid JSON) leaves a marker
+#      ($CACHE.fail, mode 600) so the next attempt is skipped until the same TTL elapses;
+#      a successful fetch clears it. An existing (older) cache is still used for rendering
+#      even while a refresh is skipped or fails.
 
 # Number parsing/formatting must not depend on the user's locale (printf %.2f with de_DE/ru_RU breaks)
 export LC_ALL=C
@@ -67,12 +75,20 @@ WEEK_RESET=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.resets_at // e
 
 CACHE_DIR="${CLAUDE_STATUSLINE_CACHE_DIR:-$HOME/.claude/cache}"
 CACHE="$CACHE_DIR/statusline-ratelimit.json"
-CACHE_MAX_AGE=60
 
 # Fallback needed when Claude Code doesn't surface rate_limits on stdin.
 NEED_FALLBACK=false
 if [ -z "$FIVE_H" ] && [ -z "$WEEK" ]; then
     NEED_FALLBACK=true
+fi
+
+# Cache TTL: 60s when the 5h/w fallback itself is needed (time-sensitive),
+# 300s when the only reason to fetch is the per-model weekly usage (less
+# urgent, and keeps the endpoint call infrequent).
+if [ "$NEED_FALLBACK" = true ]; then
+    CACHE_MAX_AGE=60
+else
+    CACHE_MAX_AGE=300
 fi
 
 # Per-model weekly usage: opt-out via CLAUDE_STATUSLINE_MODEL_LIMIT=0, and
@@ -94,36 +110,50 @@ iso_to_epoch() {
         date -d "${iso}" +%s 2>/dev/null
 }
 
+# True if $1 (a file path) exists and is no older than CACHE_MAX_AGE.
+file_fresh() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    local mtime now_epoch
+    mtime=$(stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    [ $((now_epoch - mtime)) -le $CACHE_MAX_AGE ]
+}
+
 # Refresh $CACHE from the Anthropic OAuth usage endpoint if it's missing or
-# older than CACHE_MAX_AGE. Called at most once per render.
+# older than CACHE_MAX_AGE. Called at most once per render. A failed fetch
+# (no token, curl error, invalid JSON) leaves a $CACHE.fail marker so the
+# next call skips retrying until it too is older than CACHE_MAX_AGE; a
+# successful fetch clears that marker. An existing stale cache is left in
+# place either way and is still used by the caller for rendering.
 refresh_usage_cache() {
-    local cache_stale=true
-    if [ -f "$CACHE" ]; then
-        local cache_mtime now_epoch
-        cache_mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
-        now_epoch=$(date +%s)
-        if [ $((now_epoch - cache_mtime)) -le $CACHE_MAX_AGE ]; then
-            cache_stale=false
+    if file_fresh "$CACHE"; then
+        return
+    fi
+    if file_fresh "$CACHE.fail"; then
+        return
+    fi
+
+    mkdir -p "$CACHE_DIR"
+    local token
+    token=$(security find-generic-password -a "$USER" -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+    if [ -n "$token" ]; then
+        ( umask 077; curl -s --max-time 2 \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            https://api.anthropic.com/api/oauth/usage > "$CACHE.tmp" 2>/dev/null )
+        if [ -s "$CACHE.tmp" ] && jq -e '.five_hour.utilization' "$CACHE.tmp" >/dev/null 2>&1; then
+            chmod 600 "$CACHE.tmp"
+            mv "$CACHE.tmp" "$CACHE"
+            rm -f "$CACHE.fail"
+            return
+        else
+            rm -f "$CACHE.tmp"
         fi
     fi
 
-    if [ "$cache_stale" = true ]; then
-        mkdir -p "$CACHE_DIR"
-        local token
-        token=$(security find-generic-password -a "$USER" -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-        if [ -n "$token" ]; then
-            ( umask 077; curl -s --max-time 2 \
-                -H "Authorization: Bearer $token" \
-                -H "anthropic-beta: oauth-2025-04-20" \
-                https://api.anthropic.com/api/oauth/usage > "$CACHE.tmp" 2>/dev/null )
-            if [ -s "$CACHE.tmp" ] && jq -e '.five_hour.utilization' "$CACHE.tmp" >/dev/null 2>&1; then
-                chmod 600 "$CACHE.tmp"
-                mv "$CACHE.tmp" "$CACHE"
-            else
-                rm -f "$CACHE.tmp"
-            fi
-        fi
-    fi
+    ( umask 077; : > "$CACHE.fail" )
+    chmod 600 "$CACHE.fail" 2>/dev/null
 }
 
 if [ "$NEED_FALLBACK" = true ] || [ "$NEED_MODEL_LIMIT" = true ]; then
@@ -226,6 +256,10 @@ DUR_FMT=$(format_duration "$DUR_SEC")
 
 LINE="${CYAN}${DIR_DISPLAY}${RESET}"
 
+if [ -n "$MODEL_NAME" ]; then
+    LINE="${LINE} | ${MAGENTA}${MODEL_NAME}${RESET}"
+fi
+
 LINE="${LINE} | ${YELLOW}${COST_FMT}${RESET}"
 
 if [ "$LINES_ADD" -gt 0 ] || [ "$LINES_DEL" -gt 0 ]; then
@@ -245,28 +279,57 @@ if [ -n "$FIVE_H" ]; then
     LINE="${LINE} | ${SEG}"
 fi
 
-if [ -n "$WEEK" ]; then
-    WEEK_INT=$(printf '%.0f' "$WEEK")
-    WEEK_COLOR=$(color_for_pct "$WEEK_INT")
-    SEG="${WEEK_COLOR}w:${WEEK_INT}%${RESET}"
-    if [ -n "$WEEK_RESET" ]; then
-        DIFF=$((WEEK_RESET - NOW))
-        SEG="${SEG} ${GRAY}($(format_duration "$DIFF"))${RESET}"
+# Weekly segment: WEEK (all models, from stdin/fallback) plus, when known,
+# the current model's own weekly usage after a gray "/". Hidden entirely
+# when neither is known. One reset countdown for the whole segment when
+# only one of WEEK_RESET/MODEL_RESET is known, or both are known and differ
+# by at most 60s (WEEK_RESET wins when both qualify); otherwise each value
+# gets its own countdown right after it.
+if [ -n "$WEEK" ] || [ -n "$MODEL_PCT" ]; then
+    if [ -n "$WEEK" ]; then
+        WEEK_INT=$(printf '%.0f' "$WEEK")
+        WEEK_COLOR=$(color_for_pct "$WEEK_INT")
+        WEEK_VAL="${WEEK_COLOR}${WEEK_INT}%${RESET}"
+    else
+        WEEK_VAL="${GRAY}-${RESET}"
     fi
-    LINE="${LINE} | ${SEG}"
-fi
 
-if [ -n "$MODEL_NAME" ]; then
-    LINE="${LINE} | ${MAGENTA}${MODEL_NAME}${RESET}"
+    MODEL_VAL=""
     if [ -n "$MODEL_PCT" ]; then
         MODEL_PCT_INT=$(printf '%.0f' "$MODEL_PCT")
         MODEL_PCT_COLOR=$(color_for_pct "$MODEL_PCT_INT")
-        LINE="${LINE} ${MODEL_PCT_COLOR}${MODEL_PCT_INT}%${RESET}"
-        if [ -n "$MODEL_RESET" ]; then
-            DIFF=$((MODEL_RESET - NOW))
-            LINE="${LINE} ${GRAY}($(format_duration "$DIFF"))${RESET}"
+        MODEL_VAL="${GRAY}/${RESET}${MODEL_PCT_COLOR}${MODEL_PCT_INT}%${RESET}"
+    fi
+
+    SPLIT_RESETS=false
+    if [ -n "$WEEK" ] && [ -n "$MODEL_PCT" ] && [ -n "$WEEK_RESET" ] && [ -n "$MODEL_RESET" ]; then
+        RESET_DIFF=$((WEEK_RESET - MODEL_RESET))
+        if [ "$RESET_DIFF" -lt 0 ]; then
+            RESET_DIFF=$((-RESET_DIFF))
+        fi
+        if [ "$RESET_DIFF" -gt 60 ]; then
+            SPLIT_RESETS=true
         fi
     fi
+
+    if [ "$SPLIT_RESETS" = true ]; then
+        WEEK_VAL="${WEEK_VAL} ${GRAY}($(format_duration $((WEEK_RESET - NOW))))${RESET}"
+        MODEL_VAL="${MODEL_VAL} ${GRAY}($(format_duration $((MODEL_RESET - NOW))))${RESET}"
+        SEG="w:${WEEK_VAL}${MODEL_VAL}"
+    else
+        SEG="w:${WEEK_VAL}${MODEL_VAL}"
+        RESET_AT=""
+        if [ -n "$WEEK_RESET" ]; then
+            RESET_AT="$WEEK_RESET"
+        elif [ -n "$MODEL_RESET" ]; then
+            RESET_AT="$MODEL_RESET"
+        fi
+        if [ -n "$RESET_AT" ]; then
+            SEG="${SEG} ${GRAY}($(format_duration $((RESET_AT - NOW))))${RESET}"
+        fi
+    fi
+
+    LINE="${LINE} | ${SEG}"
 fi
 
 LINE="${LINE} | ${SAGE}${DUR_FMT}${RESET}"

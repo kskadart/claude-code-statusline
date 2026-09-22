@@ -64,8 +64,11 @@ render_line() {
 # (XhYm and XdYh formats truncate, they don't show seconds/minutes below
 # their own granularity, so a small margin makes the text stable). This
 # must keep matching the "Example" block in README.md.
+five_reset=$((now + 1*3600 + 39*60 + 30))
+week_reset=$((now + 3*86400 + 6*3600 + 1800))
+
 fixture_a="$WORK_DIR/a.json"
-jq -n --argjson five_reset $((now + 1*3600 + 39*60 + 30)) --argjson week_reset $((now + 3*86400 + 6*3600 + 1800)) '{
+jq -n --argjson five_reset "$five_reset" --argjson week_reset "$week_reset" '{
   workspace: { current_dir: "/home/user/.claude" },
   model: { id: "claude-fable-5-1", display_name: "Fable 5.1" },
   cost: { total_cost_usd: 0, total_duration_ms: 6000, total_lines_added: 0, total_lines_removed: 0 },
@@ -77,12 +80,15 @@ jq -n --argjson five_reset $((now + 1*3600 + 39*60 + 30)) --argjson week_reset $
 }' > "$fixture_a"
 
 # Usage-endpoint response for fixture A's model segment: same shape as
-# tests/fixtures/usage-limits.json (a weekly_scoped row for "Fable"), but
-# with resets_at generated from `now` so the screenshot shows a realistic
-# countdown instead of a multi-decade one. Served through the curl stub only
-# while rendering fixture A (see render_line's $2 above).
+# tests/fixtures/usage-limits.json (a weekly_scoped row for "Fable"), with
+# resets_at set to the *same instant* as fixture A's own seven_day.resets_at
+# above (round-tripped through gmtime|strftime, the same ISO shape
+# statusline.sh's iso_to_epoch parses back), so the w: segment's two windows
+# coincide and collapse to a single trailing countdown ("w:37%/80% (3d6h)")
+# instead of one per value. Served through the curl stub only while
+# rendering fixture A (see render_line's $2 above).
 fixture_a_usage="$WORK_DIR/a-usage.json"
-jq -n --argjson model_reset $((now + 2*86400 + 21*3600 + 1800)) '{
+jq -n --argjson model_reset "$week_reset" '{
   five_hour: { utilization: 23, resets_at: "2099-01-01T00:00:00.000000+00:00" },
   seven_day: { utilization: 37, resets_at: "2099-01-01T00:00:00.000000+00:00" },
   limits: [
