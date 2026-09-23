@@ -609,3 +609,162 @@ file_mode() {
     [[ "$clean" == *"w:37%"* ]]
     [ -z "$stderr" ]
 }
+
+@test "dir name with a literal backslash sequence renders as plain text, one line" {
+    # jq's own \\ escape produces a single literal backslash, so the JSON
+    # value of current_dir is the 8-char string foo\nbar (backslash + n,
+    # not a real newline).
+    local fixture="$BATS_TEST_TMPDIR/dir-literal-backslash.json"
+    jq '.workspace.current_dir = "/tmp/foo\\nbar"' "$FIXTURES_DIR/minimal.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == "foo\\nbar | "* ]]
+}
+
+@test "dir name containing literal ESC-like text is shown verbatim, not interpreted as a real escape" {
+    # Same idea, but the literal text spells out a red SGR sequence
+    # (backslash 033[31mX); it must never be turned into a real ESC byte.
+    local fixture="$BATS_TEST_TMPDIR/dir-fake-escape.json"
+    jq '.workspace.current_dir = "/tmp/dir\\033[31mX"' "$FIXTURES_DIR/minimal.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *'dir\033[31mX'* ]]
+
+    # The raw (unstripped) output still carries the script's own real
+    # cyan escape for the dir segment...
+    [[ "$output" == *$'\033[36m'* ]]
+    # ...but no real red escape: minimal.json has no lines segment, so the
+    # only way a real \033[31m could appear is if the dir text's literal
+    # "\033[31m" had been interpreted -- it must not have been.
+    local red_count
+    red_count=$(printf '%s' "$output" | grep -o $'\033\[31m' | wc -l)
+    [ "$red_count" -eq 0 ]
+}
+
+@test "dir name with a real newline and a real ESC byte is sanitized to plain text, one line" {
+    # jq's \n and \u001b here are real JSON escapes: a real LF and a real
+    # ESC byte end up in current_dir.
+    local fixture="$BATS_TEST_TMPDIR/dir-real-control-bytes.json"
+    jq '.workspace.current_dir = "/tmp/a\nb\u001bc"' "$FIXTURES_DIR/minimal.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == "abc | "* ]]
+}
+
+@test "empty stdin: exit 0, no stdout, no stderr" {
+    run --separate-stderr bash -c 'PATH="$1" HOME="$2" CLAUDE_STATUSLINE_CACHE_DIR="$3" "$4" < /dev/null' _ \
+        "$PATH" "$HOME" "$CLAUDE_STATUSLINE_CACHE_DIR" "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$stderr" ]
+}
+
+@test "whitespace-only stdin: exit 0, no stdout, no stderr" {
+    local fixture="$BATS_TEST_TMPDIR/whitespace-only.txt"
+    printf '  \n\t \n' > "$fixture"
+
+    run --separate-stderr bash -c 'PATH="$1" HOME="$2" CLAUDE_STATUSLINE_CACHE_DIR="$3" "$4" < "$5"' _ \
+        "$PATH" "$HOME" "$CLAUDE_STATUSLINE_CACHE_DIR" "$SCRIPT" "$fixture"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ -z "$stderr" ]
+}
+
+@test "total_duration_ms as a command-substitution string never reaches arithmetic: no command run, duration shows 'now'" {
+    local marker="$BATS_TEST_TMPDIR/pwned-duration"
+    rm -f "$marker"
+    local fixture="$BATS_TEST_TMPDIR/dur-injection.json"
+    jq --arg mk "$marker" '.cost.total_duration_ms = ("a[$(touch " + $mk + ")]")' "$FIXTURES_DIR/minimal.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ ! -f "$marker" ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    clean=$(strip_ansi "$output")
+    # DUR_MS is not all-digits, so it's normalized to 0; 0 seconds formats
+    # as "now" (format_duration's secs<=0 branch), not a positive duration.
+    [[ "$clean" == *" | now | "* ]]
+}
+
+@test "five_hour.resets_at as a command-substitution string never reaches arithmetic: no command run, no countdown shown" {
+    local marker="$BATS_TEST_TMPDIR/pwned-resets"
+    rm -f "$marker"
+    local fixture="$BATS_TEST_TMPDIR/resets-injection.json"
+    jq --arg mk "$marker" '.rate_limits.five_hour.resets_at = ("b[$(touch " + $mk + ")]")' "$FIXTURES_DIR/full.json" > "$fixture"
+
+    export CLAUDE_STATUSLINE_MODEL_LIMIT=0
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ ! -f "$marker" ]
+
+    clean=$(strip_ansi "$output")
+    # FIVE_H_RESET is not all-digits, so it's normalized to "" (empty) and
+    # the "(...)" countdown after 5h:23% is skipped entirely.
+    [[ "$clean" == *"5h:23% | "* ]]
+    [[ "$clean" != *"5h:23% ("* ]]
+}
+
+@test "used_percentage with a real ESC byte and newline is neutralized to ctx:0%, one line, no real red escape" {
+    local fixture="$BATS_TEST_TMPDIR/ctx-injection.json"
+    jq '.context_window.used_percentage = "\u001b[31mPWNED\nX"' "$FIXTURES_DIR/minimal.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"ctx:0%"* ]]
+    [[ "$output" != *"PWNED"* ]]
+    local red_count
+    red_count=$(printf '%s' "$output" | grep -o $'\033\[31m' | wc -l)
+    [ "$red_count" -eq 0 ]
+}
+
+@test "total_lines_added with a real ESC byte and newline is neutralized to +0/-3, one line, no real red escape leaks the payload" {
+    local fixture="$BATS_TEST_TMPDIR/lines-injection.json"
+    jq '.cost.total_lines_added = "\u001b[31mINJ\nX" | .cost.total_lines_removed = 3' "$FIXTURES_DIR/minimal.json" > "$fixture"
+
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+
+    clean=$(strip_ansi "$output")
+    # LINES_ADD is not all-digits, normalized to 0; LINES_DEL (3) is a
+    # clean digit string and passes through unchanged.
+    [[ "$clean" == *"+0"* ]]
+    [[ "$clean" == *"-3"* ]]
+    [[ "$output" != *"INJ"* ]]
+    # The script's own red segment (for -3) is legitimate; there must be no
+    # extra red escape beyond that one (i.e. nothing from the payload).
+    local red_count
+    red_count=$(printf '%s' "$output" | grep -o $'\033\[31m' | wc -l)
+    [ "$red_count" -eq 1 ]
+}
+
+@test "float inputs still work after integer normalization: duration and ctx% unaffected" {
+    local fixture="$BATS_TEST_TMPDIR/dur-float.json"
+    jq '.cost.total_duration_ms = 3661000.9' "$FIXTURES_DIR/minimal.json" > "$fixture"
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"1h1m"* ]]
+
+    fixture="$BATS_TEST_TMPDIR/ctx-float.json"
+    jq '.context_window.used_percentage = 42.7' "$FIXTURES_DIR/minimal.json" > "$fixture"
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == *"ctx:42%"* ]]
+}

@@ -32,6 +32,13 @@ export LC_ALL=C
 
 input=$(cat)
 
+# Empty (or whitespace-only) stdin: Claude Code renders no status line at
+# all when the script produces no output, so just exit quietly instead of
+# rendering a garbled/blank-field line from empty JSON.
+if [ -z "${input//[[:space:]]/}" ]; then
+    exit 0
+fi
+
 DIR=$(printf '%s' "$input" | jq -r '.workspace.current_dir')
 
 # zsh %1~: last path component, with $HOME abbreviated as ~
@@ -40,6 +47,16 @@ if [ "$DIR" = "$HOME" ]; then
 else
     DIR_DISPLAY="${DIR##*/}"
 fi
+
+# Untrusted input: current_dir comes straight from stdin JSON and could in
+# principle contain control bytes (CR/LF, a real ESC starting a colour
+# sequence, etc.) that would corrupt the single-line layout below or inject
+# terminal escapes. Strip all C0 control bytes and DEL via bash's own
+# [[:cntrl:]] class (LC_ALL=C above makes this reliable across platforms);
+# leave everything else, including multi-byte UTF-8, untouched -- an
+# explicit $'\001'-$'\037' byte-range pattern would instead chew into
+# multi-byte UTF-8 sequences (e.g. emoji), which [[:cntrl:]] does not.
+DIR_DISPLAY=${DIR_DISPLAY//[[:cntrl:]]/}
 
 # Model name/id: one jq call extracts both raw fields (empty string when
 # absent/null/not-a-string), silently on malformed input. Display name wins,
@@ -71,13 +88,37 @@ COST=$(printf '%s' "$input" | jq -r '.cost.total_cost_usd // 0')
 DUR_MS=$(printf '%s' "$input" | jq -r '.cost.total_duration_ms // 0')
 LINES_ADD=$(printf '%s' "$input" | jq -r '.cost.total_lines_added // 0')
 LINES_DEL=$(printf '%s' "$input" | jq -r '.cost.total_lines_removed // 0')
-PCT=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+PCT=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // 0')
 
 # Try built-in rate_limits field first
 FIVE_H=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
 FIVE_H_RESET=$(printf '%s' "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 WEEK=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 WEEK_RESET=$(printf '%s' "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+
+# Fields used in $(( )) or printed raw into the line must be plain integers:
+# a non-numeric string reaching bash arithmetic can run arbitrary commands
+# (arithmetic expansion recursively expands nested $(...)), and raw bytes
+# from a hostile stdin field (e.g. a real ESC byte) would otherwise reach
+# the printed line untouched. Take the integer part and reject anything left
+# that isn't all digits; DUR_MS/LINES_ADD/LINES_DEL/PCT fall back to 0 (they
+# are always printed or compared), FIVE_H_RESET/WEEK_RESET fall back to ""
+# (only used when non-empty). FIVE_H/WEEK/COST are already made safe by
+# printf %.0f/%.2f and are left alone; MODEL_PCT/MODEL_RESET are already
+# guarded upstream (a jq numeric-type check, and iso_to_epoch's `date`
+# output) and don't need this either.
+DUR_MS=${DUR_MS%%.*}
+case "$DUR_MS" in ''|*[!0-9]*) DUR_MS=0 ;; esac
+LINES_ADD=${LINES_ADD%%.*}
+case "$LINES_ADD" in ''|*[!0-9]*) LINES_ADD=0 ;; esac
+LINES_DEL=${LINES_DEL%%.*}
+case "$LINES_DEL" in ''|*[!0-9]*) LINES_DEL=0 ;; esac
+PCT=${PCT%%.*}
+case "$PCT" in ''|*[!0-9]*) PCT=0 ;; esac
+FIVE_H_RESET=${FIVE_H_RESET%%.*}
+case "$FIVE_H_RESET" in ''|*[!0-9]*) FIVE_H_RESET="" ;; esac
+WEEK_RESET=${WEEK_RESET%%.*}
+case "$WEEK_RESET" in ''|*[!0-9]*) WEEK_RESET="" ;; esac
 
 CACHE_DIR="${CLAUDE_STATUSLINE_CACHE_DIR:-$HOME/.claude/cache}"
 CACHE="$CACHE_DIR/statusline-ratelimit.json"
@@ -211,14 +252,14 @@ fi
 TIME=$(date +%H:%M:%S)
 NOW=$(date +%s)
 
-CYAN='\033[36m'
-GRAY='\033[90m'
-SAGE='\033[38;5;108m'
-GREEN='\033[32m'
-YELLOW='\033[33m'
-RED='\033[31m'
-ORANGE='\033[38;5;208m'
-RESET='\033[0m'
+CYAN=$'\033[36m'
+GRAY=$'\033[90m'
+SAGE=$'\033[38;5;108m'
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+RED=$'\033[31m'
+ORANGE=$'\033[38;5;208m'
+RESET=$'\033[0m'
 
 # Pick a color based on a 0-100 usage percentage
 color_for_pct() {
@@ -349,4 +390,4 @@ fi
 LINE="${LINE} | ${SAGE}${DUR_FMT}${RESET}"
 LINE="${LINE} | ${ORANGE}${TIME}${RESET}"
 
-printf '%b\n' "$LINE"
+printf '%s\n' "$LINE"
