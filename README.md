@@ -88,8 +88,11 @@ cargo install --git https://github.com/kskadart/claude-code-statusline --locked
 }
 ```
 
-To upgrade, repeat the same steps. If you installed the old `statusline.sh`,
-remove `~/.claude/statusline.sh` after switching the command.
+To upgrade, repeat the same steps. Cargo replaces an older version on its own
+and skips the install if you're already on the latest one; add `--force` to
+reinstall anyway.
+
+If you installed the old `statusline.sh`, remove `~/.claude/statusline.sh` after switching the command.
 
 ## Configuration
 
