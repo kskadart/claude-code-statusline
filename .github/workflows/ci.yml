@@ -29,5 +29,25 @@ jobs:
       - name: shellcheck
         run: shellcheck statusline.sh docs/render-screenshot.sh tests/stubs/*
 
-      - name: bats
+      - name: bats (statusline.sh)
         run: bats tests/
+
+      - name: Install Rust with the official rustup
+        run: |
+          rustup toolchain install stable --profile default
+          rustup default stable
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build
+        run: cargo build --release
+
+      - name: bats (Rust binary)
+        run: STATUSLINE_BIN="$PWD/target/release/claude-code-statusline" bats tests/
