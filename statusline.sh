@@ -189,7 +189,9 @@ refresh_usage_cache() {
             -H "Authorization: Bearer $token" \
             -H "anthropic-beta: oauth-2025-04-20" \
             https://api.anthropic.com/api/oauth/usage > "$CACHE.tmp" 2>/dev/null )
-        if [ -s "$CACHE.tmp" ] && jq -e '.five_hour.utilization' "$CACHE.tmp" >/dev/null 2>&1; then
+        # Validate the response's shape, not a value: five_hour is legitimately
+        # null in an otherwise good response, and error bodies have neither key.
+        if [ -s "$CACHE.tmp" ] && jq -e 'type == "object" and (has("five_hour") or has("limits"))' "$CACHE.tmp" >/dev/null 2>&1; then
             chmod 600 "$CACHE.tmp"
             mv "$CACHE.tmp" "$CACHE"
             rm -f "$CACHE.fail"

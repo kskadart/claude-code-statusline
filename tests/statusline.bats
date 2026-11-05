@@ -161,6 +161,33 @@ file_mode() {
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
 }
 
+@test "usage response with five_hour: null is cached, not treated as a failure" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    local response="$BATS_TEST_TMPDIR/five-hour-null.json"
+    jq '.five_hour = null' "$FIXTURES_DIR/usage-limits.json" > "$response"
+    export STUB_CURL_RESPONSE_FILE="$response"
+
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [ -f "$CACHE_FILE" ]
+    [ ! -f "$CACHE_FILE.fail" ]
+    clean=$(strip_ansi "$output")
+    # The model's own weekly usage still comes through.
+    [[ "$clean" == *"/80%"* ]]
+}
+
+@test "usage error body (no five_hour or limits key) still leaves a fail marker" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    local response="$BATS_TEST_TMPDIR/error-body.json"
+    printf '{"type":"error","error":{"type":"authentication_error"}}' > "$response"
+    export STUB_CURL_RESPONSE_FILE="$response"
+
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [ ! -f "$CACHE_FILE" ]
+    [ -f "$CACHE_FILE.fail" ]
+}
+
 @test "lines segment shown as +12/-3 when lines were added and removed" {
     run_statusline "$FIXTURES_DIR/lines.json"
     [ "$status" -eq 0 ]
