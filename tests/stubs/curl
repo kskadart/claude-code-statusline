@@ -6,7 +6,7 @@
 #                              stub runs, so tests can assert curl was (or
 #                              was not) invoked.
 #   STUB_CURL_RESPONSE_FILE  - if set, its contents are printed to stdout
-#                              (the real statusline.sh redirects curl's
+#                              (the binary redirects curl's
 #                              stdout into its own cache tmp file, so this
 #                              stub does not need to look at its arguments).
 #   (STUB_CURL_RESPONSE_FILE unset) - print nothing, exit 0 (empty response).

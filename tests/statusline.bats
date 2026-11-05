@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for statusline.sh.
+# End-to-end tests for the release binary: run `cargo build --release` first.
 #
 # Safety: every test prepends tests/stubs (fake `security` and `curl`) to
 # PATH, so the script can never read the real macOS Keychain or make a real
@@ -14,9 +14,8 @@
 
 bats_require_minimum_version 1.5.0
 
-# Runs against statusline.sh by default; set STATUSLINE_BIN to test the Rust
-# binary, which has to pass the same suite.
-SCRIPT="${STATUSLINE_BIN:-$BATS_TEST_DIRNAME/../statusline.sh}"
+# Set STATUSLINE_BIN to test a binary from somewhere else.
+SCRIPT="${STATUSLINE_BIN:-$BATS_TEST_DIRNAME/../target/release/claude-code-statusline}"
 STUBS_DIR="$BATS_TEST_DIRNAME/stubs"
 FIXTURES_DIR="$BATS_TEST_DIRNAME/fixtures"
 
@@ -46,7 +45,7 @@ strip_ansi() {
     printf '%s' "$1" | perl -pe 's/\e\[[0-9;]*m//g'
 }
 
-# Run statusline.sh with the given fixture file on stdin, in an explicit,
+# Run the binary with the given fixture file on stdin, in an explicit,
 # minimal environment (PATH/HOME/CLAUDE_STATUSLINE_CACHE_DIR threaded through
 # as positional args, not string-interpolated, to avoid quoting issues).
 run_statusline() {
@@ -265,7 +264,7 @@ file_mode() {
 @test "resets_at far in the future (+91800s) formats as (1d1h)" {
     local fixture="$BATS_TEST_TMPDIR/resets-far.json"
     # 91800s = 1d1h30m, a 30-minute margin so a second's jitter between
-    # computing the offset here and NOW inside statusline.sh never flips
+    # computing the offset here and the binary reading the clock never flips
     # the hour bucket (91800 was 90000 = exactly 1d1h, which flapped to
     # 1d0h roughly 1 run in 10 under a slow test host).
     with_resets_at "$FIXTURES_DIR/resets-template.json" "$fixture" 91800
@@ -433,9 +432,8 @@ file_mode() {
     export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/usage-limits.json"
 
     # Build a fixture whose stdin seven_day.resets_at is the exact same
-    # instant as the API's Fable weekly_scoped row (computed the same way
-    # statusline.sh's own iso_to_epoch does: BSD `date -j -f` first, GNU
-    # `date -d` fallback), so WEEK_RESET == MODEL_RESET and the segment
+    # instant as the API's Fable weekly_scoped row (BSD `date -j -f` first,
+    # GNU `date -d` fallback), so WEEK_RESET == MODEL_RESET and the segment
     # collapses to one trailing countdown instead of two.
     local model_reset_iso model_reset_epoch
     model_reset_iso=$(jq -r '.limits[] | select(.kind == "weekly_scoped" and .scope.model.display_name == "Fable") | .resets_at' "$FIXTURES_DIR/usage-limits.json")

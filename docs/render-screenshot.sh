@@ -1,8 +1,9 @@
 #!/bin/bash
 # Regenerate docs/screenshot.html (and, with --render, docs/screenshot.png)
-# from the *real* output of ../statusline.sh on a few built-in fixtures.
+# from the *real* output of the release binary on a few built-in fixtures.
+# Run `cargo build --release` first.
 #
-# Safety: runs statusline.sh with tests/stubs (fake `security`/`curl`) first
+# Safety: runs the binary with tests/stubs (fake `security`/`curl`) first
 # on PATH, and HOME / CLAUDE_STATUSLINE_CACHE_DIR pointed at a temp dir, so
 # it never touches the real Keychain, network, or ~/.claude/cache. All
 # fixtures below embed rate_limits directly, so the 5h/w fallback path never
@@ -26,7 +27,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-STATUSLINE="$REPO_ROOT/statusline.sh"
+STATUSLINE="$REPO_ROOT/target/release/claude-code-statusline"
+if [ ! -x "$STATUSLINE" ]; then
+    echo "$STATUSLINE not found: run cargo build --release first." >&2
+    exit 1
+fi
 STUBS_DIR="$REPO_ROOT/tests/stubs"
 
 WORK_DIR=$(mktemp -d)
@@ -60,7 +65,7 @@ render_line() {
 # --- Fixture A: the plain README example -----------------------------------
 # Offsets carry a safety margin (30s / 30min) past the exact hour/day
 # boundary so a second of wall-clock drift between computing `now` here and
-# statusline.sh reading its own `NOW` can never flip the rendered bucket
+# the binary reading the clock can never flip the rendered bucket
 # (XhYm and XdYh formats truncate, they don't show seconds/minutes below
 # their own granularity, so a small margin makes the text stable). This
 # must keep matching the "Example" block in README.md.
@@ -83,7 +88,7 @@ jq -n --argjson five_reset "$five_reset" --argjson week_reset "$week_reset" '{
 # tests/fixtures/usage-limits.json (a weekly_scoped row for "Fable"), with
 # resets_at set to the *same instant* as fixture A's own seven_day.resets_at
 # above (round-tripped through gmtime|strftime, the same ISO shape
-# statusline.sh's iso_to_epoch parses back), so the w: segment's two windows
+# the binary parses back), so the w: segment's two windows
 # coincide and collapse to a single trailing countdown ("w:37%/80% (3d6h)")
 # instead of one per value. Served through the curl stub only while
 # rendering fixture A (see render_line's $2 above).
@@ -132,7 +137,7 @@ raw_b=$(render_line "$fixture_b")
 raw_c=$(render_line "$fixture_c")
 
 # --- ANSI SGR -> inline-styled HTML spans -----------------------------------
-# Only the codes statusline.sh actually emits are handled.
+# Only the codes the binary actually emits are handled.
 ansi_to_html() {
     perl -pe '
         s/\e\[36m/<span style="color:#00cdcd">/g;             # cyan   (dir)

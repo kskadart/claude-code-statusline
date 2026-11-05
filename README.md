@@ -8,7 +8,7 @@ A status line for [Claude Code](https://claude.com/claude-code). It runs on
 every render, below the chat, and shows the project folder, session cost,
 and context window usage. It also shows how much of your 5-hour and 7-day
 rate limit you've used, when each one resets, how long the session has run,
-the selected model, and the clock. You install it as a single script plus one line in
+the selected model, and the clock. You install it as a single binary plus one line in
 `settings.json`.
 
 ![Status line screenshot](docs/screenshot.png)
@@ -43,28 +43,53 @@ myproj | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m12s | Sonne
 
 ## Requirements
 
-- bash, jq
+- Claude Code with `statusLine` support
 - curl — needed for the rate-limit fallback and for the per-model weekly
   usage (both macOS-only, see below)
-- Claude Code with `statusLine` support
-- for development: perl, shellcheck, bats
+- for development: Rust via [rustup](https://rustup.rs), plus jq, perl,
+  shellcheck, bats
 
 The main path (data from stdin) works on macOS and Linux. Both the
 rate-limit fallback and the per-model weekly usage (see below) are
-macOS-only — they use the Keychain (`security`) and BSD `date -j -f`; on
-Linux both are silently skipped (the per-model fetch is skipped without
-even trying, since `security` isn't on PATH there).
+macOS-only because they read the Keychain with `security`; on Linux the
+per-model fetch is skipped without even trying, since `security` isn't on
+PATH there, and the fallback silently finds no token.
 
 ## Install
 
-1. Copy `statusline.sh` to `~/.claude/statusline.sh` and `chmod +x` it.
-2. Add to `~/.claude/settings.json`:
+### Prebuilt binary
+
+Download the binary for your platform, then add the `statusLine` block to
+`~/.claude/settings.json`. Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`.
+
+```bash
+target=aarch64-apple-darwin  # pick yours from the list above
+curl -fsSL "https://github.com/kskadart/claude-code-statusline/releases/latest/download/claude-code-statusline-$target.tar.gz" | tar -xz -C ~/.claude
+```
 
 ```json
 {
-  "statusLine": { "type": "command", "command": "~/.claude/statusline.sh", "padding": 2 }
+  "statusLine": { "type": "command", "command": "~/.claude/claude-code-statusline", "padding": 2 }
 }
 ```
+
+### With Cargo
+
+With a Rust toolchain from [rustup](https://rustup.rs), build it yourself and
+point `~/.claude/settings.json` at the result:
+
+```bash
+cargo install --git https://github.com/kskadart/claude-code-statusline --locked
+```
+
+```json
+{
+  "statusLine": { "type": "command", "command": "~/.cargo/bin/claude-code-statusline", "padding": 2 }
+}
+```
+
+To upgrade, repeat the same steps. If you installed the old `statusline.sh`,
+remove `~/.claude/statusline.sh` after switching the command.
 
 ## Configuration
 
@@ -77,9 +102,9 @@ even trying, since `security` isn't on PATH there).
 ## How rate limits are obtained
 
 1. First choice: the `rate_limits` field in the JSON Claude Code pipes to
-   the script on stdin. Current Claude Code versions populate this, and
-   that's all the script needs for the `5h` and `w` segments.
-2. Fallback, only if that field is missing: the script reads the OAuth
+   the program on stdin. Current Claude Code versions populate this, and
+   that's all the program needs for the `5h` and `w` segments.
+2. Fallback, only if that field is missing: the program reads the OAuth
    token that Claude Code itself stores in the macOS Keychain (item
    `Claude Code-credentials`) and queries
    `https://api.anthropic.com/api/oauth/usage` with the header
@@ -89,15 +114,15 @@ even trying, since `security` isn't on PATH there).
    **This fallback endpoint is unofficial and undocumented.** It can change
    or disappear without notice. The token is sent only to
    `api.anthropic.com`, nowhere else. If this isn't acceptable for you,
-   delete the fallback block from the script — the stdin path keeps
-   working on its own.
+   remove the fetch from `collect` in `src/main.rs` and rebuild — the stdin
+   path keeps working on its own.
 
 3. The current model's own weekly usage — the second value of the `w:`
    segment, after a gray `/` — is not part of stdin at all — Claude Code's
-   `rate_limits` field has no per-model breakdown. The script identifies
+   `rate_limits` field has no per-model breakdown. The program identifies
    the current model from stdin's `model.display_name`/`model.id`, the
    same name the model segment shows.
-   Whenever a model name is known, the script fetches the weekly usage from
+   Whenever a model name is known, the program fetches the weekly usage from
    the same
    `https://api.anthropic.com/api/oauth/usage` response's `limits[]` array
    (same OAuth token, same unofficial-endpoint caveat as above), at most
@@ -118,44 +143,55 @@ even trying, since `security` isn't on PATH there).
 
 4. A failed fetch (no token, curl error, invalid JSON) leaves a
    `statusline-ratelimit.json.fail` marker (mode `600`) next to the cache,
-   so the script backs off and doesn't retry until that marker is older
+   so the program backs off and doesn't retry until that marker is older
    than the same TTL that applies to the cache; a successful fetch clears
    it. An existing, older cache is still used for rendering even while a
    refresh is skipped or fails.
 
 ## Design notes
 
-- The script runs on the hot path — once per render. Keep forks minimal;
-  no `git` calls (branch info is intentionally not shown).
-- If you change the segment layout, update the comment at the top of
-  `statusline.sh` to match.
-- The script's own working directory is not the session's working
+- It runs on the hot path — once per render. The usual render starts no
+  processes at all; `security` and `curl` run only when the cache needs a
+  refresh. No `git` calls (branch info is intentionally not shown).
+- If you change the segment layout, update the doc comment on `render` in
+  `src/render.rs` to match.
+- The program's own working directory is not the session's working
   directory — the folder shown always comes from `workspace.current_dir`.
 
 ## Development
 
 ```bash
-shellcheck statusline.sh docs/render-screenshot.sh tests/stubs/*
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo build --release
 bats tests/
+shellcheck docs/render-screenshot.sh tests/stubs/*
 ```
 
-Install the tools:
+Install Rust with [rustup](https://rustup.rs), then the other tools:
 
 ```bash
 # macOS
-brew install shellcheck bats-core
+brew install shellcheck bats-core jq
 
 # Debian/Ubuntu
-sudo apt-get install -y shellcheck bats
+sudo apt-get install -y shellcheck bats jq
 ```
+
+Unit tests live next to the code in `src/`. `tests/statusline.bats` runs the
+release binary end to end.
 
 Tests never touch the real Keychain or network: `tests/stubs/security` and
 `tests/stubs/curl` are fakes prepended to `PATH`, and `HOME` /
 `CLAUDE_STATUSLINE_CACHE_DIR` point at per-test temp directories. See
 `tests/statusline.bats` and `tests/fixtures/`.
 
-To regenerate `docs/screenshot.png`, run `docs/render-screenshot.sh --render`
-(the `--render` flag is required to produce the PNG; without it the script
+Pushing a `vX.Y.Z` tag that matches the version in `Cargo.toml` builds every
+target and publishes a GitHub release.
+
+To regenerate `docs/screenshot.png`, build the release binary and run
+`docs/render-screenshot.sh --render` (the `--render` flag is required to produce the PNG; without it the script
 only writes `docs/screenshot.html`). Rendering needs a local Chrome or
 Chromium binary — set `CHROME_BIN` if it isn't auto-detected.
 
