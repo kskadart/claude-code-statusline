@@ -6,6 +6,7 @@
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -109,19 +110,35 @@ fn read_token() -> Option<String> {
 }
 
 fn download(token: &str, tmp: &Path) -> Option<()> {
+    let config = curl_auth_config(token)?;
     let file = private_file(tmp).ok()?;
     file.set_permissions(fs::Permissions::from_mode(PRIVATE_MODE))
         .ok()?;
-    Command::new("curl")
-        .args(["-s", "--max-time", "2"])
-        .args(["-H", &format!("Authorization: Bearer {token}")])
+    let mut curl = Command::new("curl")
+        .args(["-s", "--max-time", "2", "--config", "-"])
         .args(["-H", "anthropic-beta: oauth-2025-04-20", USAGE_URL])
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(file)
         .stderr(Stdio::null())
-        .status()
+        .spawn()
         .ok()?;
+    // Dropping stdin closes it, which is what lets curl stop reading its config.
+    if let Some(mut stdin) = curl.stdin.take() {
+        let _ = stdin.write_all(config.as_bytes());
+    }
+    curl.wait().ok()?;
     Some(())
+}
+
+/// The auth header as a curl config file. It goes over stdin because command
+/// line arguments are visible to every local user through `ps`. A token with
+/// control characters isn't a real one and could smuggle in extra config lines.
+fn curl_auth_config(token: &str) -> Option<String> {
+    if token.chars().any(char::is_control) {
+        return None;
+    }
+    let escaped = token.replace('\\', "\\\\").replace('"', "\\\"");
+    Some(format!("header = \"Authorization: Bearer {escaped}\"\n"))
 }
 
 fn private_file(path: &Path) -> std::io::Result<File> {
@@ -219,6 +236,19 @@ mod tests {
         json!({"kind": "weekly_scoped", "percent": pct,
                "resets_at": "2099-01-01T00:00:00.000000+00:00",
                "scope": {"model": {"display_name": name}}})
+    }
+
+    #[test]
+    fn curl_auth_config_quotes_the_token_and_rejects_control_characters() {
+        assert_eq!(
+            curl_auth_config("abc-123").unwrap(),
+            "header = \"Authorization: Bearer abc-123\"\n"
+        );
+        assert_eq!(
+            curl_auth_config(r#"a"b\c"#).unwrap(),
+            "header = \"Authorization: Bearer a\\\"b\\\\c\"\n"
+        );
+        assert_eq!(curl_auth_config("abc\nurl = \"http://evil\""), None);
     }
 
     #[test]

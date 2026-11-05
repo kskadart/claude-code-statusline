@@ -222,6 +222,51 @@ file_mode() {
     [ -f "$CACHE_FILE.fail" ]
 }
 
+@test "token reaches curl over stdin, never in its arguments" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/usage-limits.json"
+    export STUB_CURL_ARGS_FILE="$BATS_TEST_TMPDIR/curl-args"
+    export STUB_CURL_STDIN_FILE="$BATS_TEST_TMPDIR/curl-stdin"
+
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [ -f "$CACHE_FILE" ]
+    [ "$(grep -c "stub-token" "$STUB_CURL_ARGS_FILE")" -eq 0 ]
+    grep -qxF -- "--config" "$STUB_CURL_ARGS_FILE"
+    [ "$(cat "$STUB_CURL_STDIN_FILE")" = 'header = "Authorization: Bearer stub-token"' ]
+}
+
+@test "token with a newline can't inject curl config: no fetch, fail marker left" {
+    export STUB_SECURITY_TOKEN='abc\nurl = \"http://evil\"'
+    export STUB_CURL_RESPONSE_FILE="$FIXTURES_DIR/usage-limits.json"
+
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [ ! -f "$STUB_CURL_CALLED_MARKER" ]
+    [ -f "$CACHE_FILE.fail" ]
+}
+
+@test "unknown current_dir hides the dir segment instead of printing null" {
+    export CLAUDE_STATUSLINE_MODEL_LIMIT=0
+    local workspace fixture="$BATS_TEST_TMPDIR/no-dir.json"
+    for workspace in 'null' '{}' '{"current_dir":null}' '{"current_dir":5}' '"x"'; do
+        jq --argjson w "$workspace" '.workspace = $w' "$FIXTURES_DIR/minimal.json" > "$fixture"
+        run_statusline "$fixture"
+        [ "$status" -eq 0 ]
+        clean=$(strip_ansi "$output")
+        [[ "$clean" == '$0.01 | ctx:1% | '* ]] || false
+    done
+}
+
+@test "invalid JSON on stdin: no null and no leading separator, still exits 0" {
+    local fixture="$BATS_TEST_TMPDIR/invalid-stdin.txt"
+    printf 'not json' > "$fixture"
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" == '$0.00 | ctx:0% | now | '* ]] || false
+}
+
 @test "lines segment shown as +12/-3 when lines were added and removed" {
     run_statusline "$FIXTURES_DIR/lines.json"
     [ "$status" -eq 0 ]

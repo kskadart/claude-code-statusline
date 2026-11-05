@@ -32,14 +32,10 @@ impl Input {
     }
 
     fn from_value(root: &Value) -> Self {
-        let dir = match lookup(root, &["workspace", "current_dir"]) {
-            None | Some(Value::Null) => "null".to_string(),
-            Some(value) => raw(value),
-        };
         let int = |path: &[&str]| truthy(root, path).and_then(|s| integer(&s)).unwrap_or(0);
 
         Self {
-            dir,
+            dir: non_empty_str(root, &["workspace", "current_dir"]),
             model_display: non_empty_str(root, &["model", "display_name"]),
             model_id: non_empty_str(root, &["model", "id"]),
             cost: truthy(root, &["cost", "total_cost_usd"]).map_or(0.0, |s| number(&s)),
@@ -128,9 +124,12 @@ pub fn sanitize(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// The last path component, or `~` for the home directory.
+/// The last path component, or `~` for the home directory. Empty when the
+/// directory is unknown, even if `HOME` is unset too.
 pub fn dir_display(dir: &str, home: &str) -> String {
-    let name = if dir == home {
+    let name = if dir.is_empty() {
+        ""
+    } else if dir == home {
         "~"
     } else {
         dir.rsplit('/').next().unwrap_or_default()
@@ -183,6 +182,25 @@ mod tests {
         assert_eq!(dir_display("/home/u/proj", "/home/u"), "proj");
         assert_eq!(dir_display("/tmp/a\nb\u{1b}c", "/home/u"), "abc");
         assert_eq!(dir_display(r"/tmp/foo\nbar", "/home/u"), r"foo\nbar");
+        assert_eq!(dir_display("", "/home/u"), "");
+        assert_eq!(dir_display("", ""), "");
+    }
+
+    #[test]
+    fn only_a_string_counts_as_the_current_dir() {
+        for workspace in [
+            json!(null),
+            json!("x"),
+            json!({}),
+            json!({"current_dir": null}),
+            json!({"current_dir": 5}),
+            json!({"current_dir": ["/tmp"]}),
+        ] {
+            let input = Input::from_value(&json!({"workspace": workspace}));
+            assert_eq!(input.dir, "", "{workspace}");
+        }
+        let input = Input::from_value(&json!({"workspace": {"current_dir": "/tmp/a"}}));
+        assert_eq!(input.dir, "/tmp/a");
     }
 
     #[test]
