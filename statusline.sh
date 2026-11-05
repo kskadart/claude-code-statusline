@@ -2,11 +2,11 @@
 # Claude Code statusline with real-time Max/Pro rate-limit data.
 #
 # Layout:
-#   dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:ALL%/MODEL% (reset) | session_duration | time
+#   dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:ALL%/MODEL% (reset) | session_duration | model | time
 #
-# The model isn't its own segment: its identity is conveyed only by the
-# second value of the w: segment (the current model's own weekly usage,
-# after a gray "/").
+# The model segment is the selected model's display name (falling
+# back to its id) and is hidden when stdin names no model. The second value
+# of the w: segment, after a gray "/", is that model's own weekly usage.
 #
 # Rate-limit strategy:
 #   1. Prefer Claude Code's built-in rate_limits field (future-proof if the bug is fixed)
@@ -61,10 +61,10 @@ DIR_DISPLAY=${DIR_DISPLAY//[[:cntrl:]]/}
 # Model name/id: one jq call extracts both raw fields (empty string when
 # absent/null/not-a-string), silently on malformed input. Display name wins,
 # falling back to id; MODEL_NAME is empty when neither is a non-empty
-# string. The model name itself is never rendered; MODEL_NAME gates whether
-# the per-model weekly-usage fetch runs at all, and MODEL_DISPLAY/MODEL_ID
-# (raw) are used later to match the model's own weekly-limit row from the
-# usage endpoint.
+# string. MODEL_NAME is rendered as the last segment (after stripping control
+# bytes) and gates whether the per-model weekly-usage fetch runs at all;
+# MODEL_DISPLAY/MODEL_ID (raw) are used later to match the model's own
+# weekly-limit row from the usage endpoint.
 MODEL_TSV=$(printf '%s' "$input" | jq -r '
     def pick(f): ([f] | map(select(type == "string" and . != ""))) as $vals
         | if ($vals | length) > 0 then $vals[0] else "" end;
@@ -261,6 +261,7 @@ GREEN=$'\033[32m'
 YELLOW=$'\033[33m'
 RED=$'\033[31m'
 ORANGE=$'\033[38;5;208m'
+MAGENTA=$'\033[35m'
 RESET=$'\033[0m'
 
 # Pick a color based on a 0-100 usage percentage
@@ -390,6 +391,13 @@ if [ -n "$WEEK" ] || [ -n "$MODEL_PCT" ]; then
 fi
 
 LINE="${LINE} | ${SAGE}${DUR_FMT}${RESET}"
+
+# Untrusted input, same as DIR_DISPLAY: strip control bytes before printing.
+MODEL_SHOWN=${MODEL_NAME//[[:cntrl:]]/}
+if [ -n "$MODEL_SHOWN" ]; then
+    LINE="${LINE} | ${MAGENTA}${MODEL_SHOWN}${RESET}"
+fi
+
 LINE="${LINE} | ${ORANGE}${TIME}${RESET}"
 
 printf '%s\n' "$LINE"
