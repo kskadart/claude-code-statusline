@@ -14,7 +14,9 @@
 
 bats_require_minimum_version 1.5.0
 
-SCRIPT="$BATS_TEST_DIRNAME/../statusline.sh"
+# Runs against statusline.sh by default; set STATUSLINE_BIN to test the Rust
+# binary, which has to pass the same suite.
+SCRIPT="${STATUSLINE_BIN:-$BATS_TEST_DIRNAME/../statusline.sh}"
 STUBS_DIR="$BATS_TEST_DIRNAME/stubs"
 FIXTURES_DIR="$BATS_TEST_DIRNAME/fixtures"
 
