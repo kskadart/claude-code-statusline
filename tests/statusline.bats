@@ -82,7 +82,7 @@ file_mode() {
     stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"
 }
 
-@test "full render with rate_limits: all segments present, correct order, no model name anywhere" {
+@test "full render with rate_limits: all segments present, correct order, clock last" {
     local fixture="$BATS_TEST_TMPDIR/full.json"
     with_resets_at "$FIXTURES_DIR/full.json" "$fixture" 7200 100000
 
@@ -90,8 +90,8 @@ file_mode() {
     # all"; disable the (separate) per-model weekly-limit fetch so it
     # doesn't touch the cache dir/curl either, which would otherwise make
     # the "no curl call" / "no cache dir" assertions below false even though
-    # stdin rate_limits were used correctly. It also proves the model name
-    # (full.json has one) is never rendered anywhere on the line.
+    # stdin rate_limits were used correctly. The model segment doesn't depend
+    # on that fetch: it comes straight from stdin.
     export CLAUDE_STATUSLINE_MODEL_LIMIT=0
     run_statusline "$fixture"
     [ "$status" -eq 0 ]
@@ -107,13 +107,12 @@ file_mode() {
     [[ "$clean" == *"1h1m"* ]]
     [[ "$clean" =~ [0-9]{2}:[0-9]{2}:[0-9]{2} ]]
     [[ "$clean" != *"+0/-0"* ]]
-    [[ "$clean" != *"Fable"* ]]
 
     # Segment order via a single anchored regex over the whole stripped
     # line (chained-literal globs sharing a " | " boundary can silently
-    # never match -- see the CI failure this replaced). No model segment
-    # anywhere: dir is followed directly by cost.
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \([0-9a-z]+\)\ \|\ w:37%\ \([0-9a-z]+\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    # never match -- see the CI failure this replaced). The clock is the
+    # last segment, right after the model.
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \([0-9a-z]+\)\ \|\ w:37%\ \([0-9a-z]+\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
 
     # No fallback path should have been taken: rate_limits came from stdin.
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
@@ -139,8 +138,8 @@ file_mode() {
     clean=$(strip_ansi "$output")
     # MODEL_DISPLAY is "" so matching falls back to the id-contains branch
     # on MODEL_ID ("claude-sonnet-5"), picking usage-limits.json's Sonnet
-    # weekly_scoped row (42%); no model name is rendered anywhere.
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/42%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    # weekly_scoped row (42%); the id is also what the model segment shows.
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/42%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ claude-sonnet-5\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
 }
 
 @test "model is null: no / in w: (no per-model match attempted), no curl call" {
@@ -159,6 +158,63 @@ file_mode() {
     # carries stdin rate_limits, so NEED_FALLBACK is also false -- no reason
     # to call curl at all.
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
+}
+
+@test "model segment: magenta display name right before the clock" {
+    export CLAUDE_STATUSLINE_MODEL_LIMIT=0
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ \ \|\ $'\033'\[35mFable\ 5\.1$'\033'\[0m\ \|\ $'\033'\[38\;5\;208m[0-9:]+$'\033'\[0m$ ]]
+}
+
+@test "model segment: control bytes in display_name are stripped, line stays single" {
+    local fixture="$BATS_TEST_TMPDIR/model-hostile.json"
+    jq '.model = {display_name: "Evil\u001b[31m\nINJ"}' "$FIXTURES_DIR/full.json" > "$fixture"
+
+    export CLAUDE_STATUSLINE_MODEL_LIMIT=0
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [[ "$output" != *$'\033[31m'* ]]
+    [[ "$output" == *$'\033[35mEvil[31m'* ]]
+}
+
+@test "model segment: display_name of only control bytes hides the segment" {
+    local fixture="$BATS_TEST_TMPDIR/model-only-control.json"
+    jq '.model = {display_name: "\u001b\u0007"}' "$FIXTURES_DIR/full.json" > "$fixture"
+
+    export CLAUDE_STATUSLINE_MODEL_LIMIT=0
+    run_statusline "$fixture"
+    [ "$status" -eq 0 ]
+    clean=$(strip_ansi "$output")
+    [[ "$clean" =~ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+}
+
+@test "usage response with five_hour: null is cached, not treated as a failure" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    local response="$BATS_TEST_TMPDIR/five-hour-null.json"
+    jq '.five_hour = null' "$FIXTURES_DIR/usage-limits.json" > "$response"
+    export STUB_CURL_RESPONSE_FILE="$response"
+
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [ -f "$CACHE_FILE" ]
+    [ ! -f "$CACHE_FILE.fail" ]
+    clean=$(strip_ansi "$output")
+    # The model's own weekly usage still comes through.
+    [[ "$clean" == *"/80%"* ]]
+}
+
+@test "usage error body (no five_hour or limits key) still leaves a fail marker" {
+    export STUB_SECURITY_TOKEN="stub-token"
+    local response="$BATS_TEST_TMPDIR/error-body.json"
+    printf '{"type":"error","error":{"type":"authentication_error"}}' > "$response"
+    export STUB_CURL_RESPONSE_FILE="$response"
+
+    run_statusline "$FIXTURES_DIR/full.json"
+    [ "$status" -eq 0 ]
+    [ ! -f "$CACHE_FILE" ]
+    [ -f "$CACHE_FILE.fail" ]
 }
 
 @test "lines segment shown as +12/-3 when lines were added and removed" {
@@ -358,7 +414,7 @@ file_mode() {
     # full.json's stdin resets_at is 0 ("now") while the API row's resets_at
     # is far-future, so the two windows differ by more than 60s and each
     # gets its own countdown (the two-countdown form).
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
     # The w: label takes the worse of the two colors: 37% is green but 80%
     # is yellow, so the label itself renders yellow.
     [[ "$output" == *$'\033[33mw:'* ]]
@@ -385,7 +441,7 @@ file_mode() {
     run_statusline "$fixture"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
 
     # Exactly one closing paren inside the w: segment (no second, separate
     # countdown snuck in between "80%" and " | 1h1m").
@@ -410,7 +466,7 @@ file_mode() {
     run_statusline "$fixture"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ Haiku\ 4\.5\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
     [[ "$clean" != *"w:37%/"* ]]
     # Proves the fetch path actually ran (and simply found no match), not
     # that it was skipped.
@@ -430,7 +486,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/model-id-only.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^modelid\ \|\ \$0\.01\ \|\ ctx:1%\ \|\ 5h:5%\ \(now\)\ \|\ w:9%\ \(now\)/42%\ \([0-9]+d[0-9]+h\)\ \|\ 5s\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^modelid\ \|\ \$0\.01\ \|\ ctx:1%\ \|\ 5h:5%\ \(now\)\ \|\ w:9%\ \(now\)/42%\ \([0-9]+d[0-9]+h\)\ \|\ 5s\ \|\ claude-sonnet-5\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
 }
 
 @test "model weekly usage: curl returns nothing -> no / in w:, still exits 0" {
@@ -442,7 +498,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
     # Proves the fetch path actually ran (and got an empty response), not
     # that it was skipped.
     [ -f "$STUB_CURL_CALLED_MARKER" ]
@@ -493,7 +549,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
 }
 
@@ -505,7 +561,7 @@ file_mode() {
     run_statusline "$FIXTURES_DIR/full.json"
     [ "$status" -eq 0 ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
     # Only the all-model value (37%, green) is known, so the label takes its
     # color.
@@ -549,7 +605,7 @@ file_mode() {
     [ "$status" -eq 0 ]
     [ ! -f "$STUB_CURL_CALLED_MARKER" ]
     clean=$(strip_ansi "$output")
-    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+    [[ "$clean" =~ ^myproj\ \|\ \$1\.23\ \|\ ctx:42%\ \|\ 5h:23%\ \(now\)\ \|\ w:37%\ \(now\)/80%\ \([0-9]+d[0-9]+h\)\ \|\ 1h1m\ \|\ Fable\ 5\.1\ \|\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
 }
 
 @test "high ctx (95%) is colored red before rendering" {
