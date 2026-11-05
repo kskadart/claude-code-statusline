@@ -31,7 +31,7 @@ myproj | $0.42 | +12/-3 | ctx:18% | 5h:5% (4h51m) | w:9% (6d22h) | 3m12s | Sonne
 
 | Segment | Source (stdin JSON field) | Meaning | Color thresholds |
 |---|---|---|---|
-| dir | `workspace.current_dir` | Last path component; `~` if it equals `$HOME` | cyan, no thresholds |
+| dir | `workspace.current_dir` | Last path component; `~` if it equals `$HOME`; hidden when unknown | cyan, no thresholds |
 | cost | `cost.total_cost_usd` | Session cost so far, `$X.XX` | yellow, no thresholds |
 | `+add/-del` | `cost.total_lines_added` / `total_lines_removed` | Lines changed this session; hidden when both are 0 | green `+`, red `-` |
 | ctx | `context_window.used_percentage` | Context window fill | green <70, yellow 70-89, red ≥90 |
@@ -113,7 +113,8 @@ remove `~/.claude/statusline.sh` after switching the command.
 
    **This fallback endpoint is unofficial and undocumented.** It can change
    or disappear without notice. The token is sent only to
-   `api.anthropic.com`, nowhere else. If this isn't acceptable for you,
+   `api.anthropic.com`, nowhere else, and reaches curl over stdin, so it
+   doesn't show up in `ps`. If this isn't acceptable for you,
    remove the fetch from `collect` in `src/main.rs` and rebuild — the stdin
    path keeps working on its own.
 

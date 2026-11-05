@@ -16,7 +16,7 @@ const SAME_RESET_WINDOW_SECS: i64 = 60;
 
 #[derive(Debug, Default)]
 pub struct Status {
-    /// Already sanitized.
+    /// Already sanitized; the segment is hidden when empty.
     pub dir: String,
     pub cost: f64,
     pub lines_added: u64,
@@ -142,10 +142,11 @@ fn week_segment(status: &Status) -> Option<String> {
 /// `dir | $cost | +add/-del | ctx:N% | 5h:N% (reset) | w:ALL%/MODEL% (reset) |
 /// duration | model | clock`, skipping segments with nothing to show.
 pub fn render(status: &Status) -> String {
-    let mut segments = vec![
-        format!("{CYAN}{}{RESET}", status.dir),
-        format!("{YELLOW}${:.2}{RESET}", status.cost),
-    ];
+    let mut segments = Vec::new();
+    if !status.dir.is_empty() {
+        segments.push(format!("{CYAN}{}{RESET}", status.dir));
+    }
+    segments.push(format!("{YELLOW}${:.2}{RESET}", status.cost));
     if status.lines_added > 0 || status.lines_removed > 0 {
         segments.push(format!(
             "{GREEN}+{}{RESET}{GRAY}/{RESET}{RED}-{}{RESET}",
@@ -238,6 +239,15 @@ mod tests {
             plain(&render(&status())),
             "proj | $1.23 | ctx:42% | 1h1m | 12:30:13"
         );
+    }
+
+    #[test]
+    fn unknown_dir_hides_the_segment_and_its_separator() {
+        let line = render(&Status {
+            dir: String::new(),
+            ..status()
+        });
+        assert_eq!(plain(&line), "$1.23 | ctx:42% | 1h1m | 12:30:13");
     }
 
     #[test]
